@@ -1,0 +1,96 @@
+{
+  "table_info": {
+    "database": "PROD_DB",
+    "schema": "PUBLIC",
+    "table": "FINANCIAL_DATA",
+    "full_name": "PROD_DB.PUBLIC.FINANCIAL_DATA"
+  },
+  "columns": [
+    {
+      "name": "ID",
+      "data_type": "NUMBER",
+      "is_nullable": false,
+      "default_value": null,
+      "max_length": null,
+      "precision": 38,
+      "scale": 0,
+      "position": 1,
+      "postgres_type": "BIGINT"
+    },
+    {
+      "name": "SYMBOL",
+      "data_type": "VARCHAR",
+      "is_nullable": false,
+      "default_value": null,
+      "max_length": 10,
+      "precision": null,
+      "scale": null,
+      "position": 2,
+      "postgres_type": "VARCHAR(10)"
+    },
+    {
+      "name": "PRICE",
+      "data_type": "NUMBER",
+      "is_nullable": true,
+      "default_value": null,
+      "max_length": null,
+      "precision": 10,
+      "scale": 2,
+      "position": 3,
+      "postgres_type": "NUMERIC(10,2)"
+    },
+    {
+      "name": "VOLUME",
+      "data_type": "NUMBER",
+      "is_nullable": true,
+      "default_value": null,
+      "max_length": null,
+      "precision": 15,
+      "scale": 0,
+      "position": 4,
+      "postgres_type": "BIGINT"
+    },
+    {
+      "name": "TRADE_DATE",
+      "data_type": "DATE",
+      "is_nullable": false,
+      "default_value": null,
+      "max_length": null,
+      "precision": null,
+      "scale": null,
+      "position": 5,
+      "postgres_type": "DATE"
+    },
+    {
+      "name": "CREATED_AT",
+      "data_type": "TIMESTAMP_NTZ",
+      "is_nullable": false,
+      "default_value": "CURRENT_TIMESTAMP()",
+      "max_length": null,
+      "precision": null,
+      "scale": null,
+      "position": 6,
+      "postgres_type": "TIMESTAMP"
+    },
+    {
+      "name": "METADATA_JSON",
+      "data_type": "VARIANT",
+      "is_nullable": true,
+      "default_value": null,
+      "max_length": null,
+      "precision": null,
+      "scale": null,
+      "position": 7,
+      "postgres_type": "JSONB"
+    }
+  ],
+  "statistics": {
+    "row_count": 1250000,
+    "size_bytes": 45000000,
+    "last_altered": "2024-12-26 10:30:00"
+  },
+  "primary_keys": [
+    "ID"
+  ],
+  "extracted_at": "2024-12-26 15:45:30"
+}

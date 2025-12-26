@@ -1,0 +1,69 @@
+name: data-pipeline-system
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  # Python version
+  - python=3.11
+
+  # Core Dependencies
+  - fastapi=0.104.1
+  - uvicorn=0.24.0
+  - pydantic=2.5.0
+
+  # Database Connectors
+  - psycopg2=2.9.9
+  - sqlalchemy=2.0.23
+
+  # Data Processing
+  - pandas=2.1.4
+  - numpy=1.25.2
+  - pyarrow=14.0.2
+
+  # Security & Compression
+  - cryptography=41.0.8
+  - lz4=4.3.2
+
+  # Configuration
+  - pyyaml=6.0.1
+
+  # HTTP Client
+  - requests=2.31.0
+
+  # Development Tools
+  - pytest=7.4.3
+  - black=23.11.0
+  - isort=5.12.0
+  - flake8=6.1.0
+  - mypy=1.7.1
+
+  # Jupyter (optional for data exploration)
+  - jupyter=1.0.0
+  - ipykernel=6.26.0
+
+  # Pip dependencies (not available in conda)
+  - pip
+  - pip:
+    # Snowflake connector (not in conda-forge)
+    - snowflake-connector-python==3.6.0
+    
+    # Pydantic settings
+    - pydantic-settings==2.1.0
+    
+    # Task Queue
+    - celery==5.3.4
+    - redis==5.0.1
+    
+    # Compression
+    - zstandard==0.22.0
+    
+    # Logging & Monitoring
+    - structlog==23.2.0
+    - prometheus-client==0.19.0
+    - sentry-sdk==1.38.0
+    
+    # Environment management
+    - python-dotenv==1.0.0
+    
+    # HTTP client
+    - httpx==0.25.2
