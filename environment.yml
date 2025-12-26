@@ -1,4 +1,4 @@
-name: data-pipeline-system
+name: ms-pipeline
 channels:
   - conda-forge
   - defaults

@@ -4,6 +4,7 @@ Extracts table schemas and metadata from Snowflake and saves to local repository
 """
 import json
 import yaml
+import pandas as pd
 from pathlib import Path
 from typing import Dict, List, Any
 import snowflake.connector

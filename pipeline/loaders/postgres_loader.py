@@ -6,7 +6,7 @@ import json
 import psycopg2
 from pathlib import Path
 from typing import Dict, Any, List
-from pipeline.config.settings import get_settings
+from pipeline.config.settings import get_settings, get_postgres_connection_params
 from pipeline.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -20,13 +20,8 @@ class PostgreSQLLoader:
     def connect_to_postgres(self):
         """Establish connection to PostgreSQL (external, non-VPN)"""
         try:
-            conn = psycopg2.connect(
-                host=self.settings.postgres_host,
-                port=self.settings.postgres_port,
-                database=self.settings.postgres_database,
-                user=self.settings.postgres_user,
-                password=self.settings.postgres_password
-            )
+            conn_params = get_postgres_connection_params()
+            conn = psycopg2.connect(**conn_params)
             logger.info("Successfully connected to PostgreSQL")
             return conn
         except Exception as e:
