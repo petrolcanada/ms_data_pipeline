@@ -1,41 +1,27 @@
 # Snowflake Table Sync Configuration
 tables:
-  - name: "financial_data"
+  # - name: "financial_data"
+  #   snowflake:
+  #     database: "PROD_DB"
+  #     schema: "PUBLIC"
+  #     table: "FINANCIAL_DATA"
+  #   postgres:
+  #     schema: "public"
+  #     table: "financial_data"
+  #   sync_mode: "full"
+  #   schedule: "daily"
+  #   encryption: true
+  #   compression: true
+
+  - name: "fund_share_class_basic_info_all_funduniverse"
     snowflake:
-      database: "PROD_DB"
-      schema: "PUBLIC"
-      table: "FINANCIAL_DATA"
+      database: "CIGAM_SBX_PL"
+      schema: "DNA_ANALYTICS_INSIGHTS"
+      table: "FUND_SHARE_CLASS_BASIC_INFO_ALL_FUNDUNIVERSE"
     postgres:
       schema: "public"
-      table: "financial_data"
+      table: "fund_share_class_basic_info_all_funduniverse"
     sync_mode: "full"
     schedule: "daily"
     encryption: true
     compression: true
-    
-  - name: "market_prices"
-    snowflake:
-      database: "PROD_DB"
-      schema: "PUBLIC"
-      table: "MARKET_PRICES"
-    postgres:
-      schema: "public"
-      table: "market_prices"
-    sync_mode: "incremental"
-    incremental_column: "updated_at"
-    schedule: "hourly"
-    encryption: false
-    compression: true
-
-  - name: "company_info"
-    snowflake:
-      database: "PROD_DB"
-      schema: "PUBLIC"
-      table: "COMPANY_INFO"
-    postgres:
-      schema: "public"
-      table: "company_info"
-    sync_mode: "full"
-    schedule: "weekly"
-    encryption: true
-    compression: false
