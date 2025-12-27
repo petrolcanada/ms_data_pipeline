@@ -1,0 +1,193 @@
+"""
+Snowflake Data Extractor
+Extracts data from Snowflake tables in chunks and saves as compressed Parquet files
+"""
+import pandas as pd
+from pathlib import Path
+from typing import Dict, Any, Generator
+import snowflake.connector
+from pipeline.config.settings import get_settings, get_snowflake_connection_params
+from pipeline.utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+class SnowflakeDataExtractor:
+    """Extract data from Snowflake tables in manageable chunks"""
+    
+    def __init__(self):
+        self.settings = get_settings()
+        
+    def connect_to_snowflake(self):
+        """Establish connection to Snowflake"""
+        try:
+            conn_params = get_snowflake_connection_params()
+            conn = snowflake.connector.connect(**conn_params)
+            logger.info(f"Connected to Snowflake: {self.settings.snowflake_account}")
+            return conn
+        except Exception as e:
+            logger.error(f"Failed to connect to Snowflake: {e}")
+            raise
+    
+    def estimate_table_size(self, database: str, schema: str, table: str) -> Dict[str, Any]:
+        """
+        Estimate table size and row count
+        
+        Returns:
+            Dictionary with row_count, size_bytes, size_mb
+        """
+        conn = self.connect_to_snowflake()
+        cursor = conn.cursor()
+        
+        try:
+            query = f"""
+            SELECT 
+                ROW_COUNT,
+                BYTES
+            FROM {database}.INFORMATION_SCHEMA.TABLES 
+            WHERE TABLE_SCHEMA = '{schema}' 
+            AND TABLE_NAME = '{table}'
+            """
+            
+            cursor.execute(query)
+            result = cursor.fetchone()
+            
+            if result:
+                row_count = result[0] or 0
+                size_bytes = result[1] or 0
+                size_mb = size_bytes / (1024 * 1024)
+                
+                logger.info(f"Table {database}.{schema}.{table}:")
+                logger.info(f"  Rows: {row_count:,}")
+                logger.info(f"  Size: {size_mb:.2f} MB")
+                
+                return {
+                    "row_count": row_count,
+                    "size_bytes": size_bytes,
+                    "size_mb": size_mb
+                }
+            else:
+                raise ValueError(f"Table {database}.{schema}.{table} not found")
+                
+        finally:
+            cursor.close()
+            conn.close()
+    
+    def extract_table_chunks(
+        self, 
+        database: str, 
+        schema: str, 
+        table: str, 
+        chunk_size: int = 100000,
+        order_by: str = None
+    ) -> Generator[pd.DataFrame, None, None]:
+        """
+        Extract table data in chunks
+        
+        Args:
+            database: Snowflake database name
+            schema: Snowflake schema name
+            table: Snowflake table name
+            chunk_size: Number of rows per chunk
+            order_by: Column to order by (for consistent chunking)
+            
+        Yields:
+            DataFrame chunks
+        """
+        conn = self.connect_to_snowflake()
+        cursor = conn.cursor()
+        
+        try:
+            # Build query
+            query = f"SELECT * FROM {database}.{schema}.{table}"
+            
+            if order_by:
+                query += f" ORDER BY {order_by}"
+            
+            logger.info(f"Extracting data from {database}.{schema}.{table}")
+            logger.info(f"  Chunk size: {chunk_size:,} rows")
+            
+            # Execute query
+            cursor.execute(query)
+            
+            # Get column names
+            columns = [desc[0] for desc in cursor.description]
+            
+            chunk_num = 0
+            total_rows = 0
+            
+            while True:
+                # Fetch chunk
+                rows = cursor.fetchmany(chunk_size)
+                
+                if not rows:
+                    break
+                
+                chunk_num += 1
+                total_rows += len(rows)
+                
+                # Convert to DataFrame
+                df = pd.DataFrame(rows, columns=columns)
+                
+                logger.info(f"  Chunk {chunk_num}: {len(df):,} rows (total: {total_rows:,})")
+                
+                yield df
+            
+            logger.info(f"Extraction complete: {total_rows:,} total rows in {chunk_num} chunks")
+            
+        except Exception as e:
+            logger.error(f"Failed to extract data: {e}")
+            raise
+        finally:
+            cursor.close()
+            conn.close()
+    
+    def save_chunk_to_parquet(
+        self, 
+        df: pd.DataFrame, 
+        output_path: Path, 
+        compression: str = 'zstd',
+        compression_level: int = 3
+    ) -> Dict[str, Any]:
+        """
+        Save DataFrame chunk as compressed Parquet file
+        
+        Args:
+            df: DataFrame to save
+            output_path: Output file path
+            compression: Compression algorithm (snappy, gzip, zstd)
+            compression_level: Compression level (1-9 for gzip/zstd)
+            
+        Returns:
+            Dictionary with file metadata
+        """
+        try:
+            # Ensure output directory exists
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Save as Parquet with compression
+            df.to_parquet(
+                output_path,
+                engine='pyarrow',
+                compression=compression,
+                compression_level=compression_level if compression in ['gzip', 'zstd'] else None,
+                index=False
+            )
+            
+            file_size = output_path.stat().st_size
+            
+            logger.info(f"Saved {output_path.name}")
+            logger.debug(f"  Rows: {len(df):,}")
+            logger.debug(f"  Size: {file_size / (1024 * 1024):.2f} MB")
+            logger.debug(f"  Compression: {compression}")
+            
+            return {
+                "rows": len(df),
+                "size_bytes": file_size,
+                "size_mb": file_size / (1024 * 1024),
+                "compression": compression
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to save Parquet file: {e}")
+            raise

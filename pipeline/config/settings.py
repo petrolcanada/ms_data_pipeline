@@ -49,6 +49,14 @@ class Settings(BaseSettings):
     # Environment
     environment: str = Field("development", env="ENVIRONMENT")
     
+    # Data Export/Import Settings
+    export_base_dir: str = Field("exports", env="EXPORT_BASE_DIR")
+    import_base_dir: str = Field("imports", env="IMPORT_BASE_DIR")
+    chunk_size: int = Field(100000, env="CHUNK_SIZE")
+    compression_type: str = Field("zstd", env="COMPRESSION_TYPE")
+    compression_level: int = Field(3, env="COMPRESSION_LEVEL")
+    encryption_iterations: int = Field(100000, env="KEY_DERIVATION_ITERATIONS")
+    
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
