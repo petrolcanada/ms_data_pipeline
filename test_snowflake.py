@@ -17,6 +17,8 @@ def test_snowflake_connection():
     print("Snowflake Connection Test")
     print("=" * 50)
     
+    # Load settings outside try block so it's available in except block
+    settings = None
     try:
         # Load settings
         settings = get_settings()
@@ -97,9 +99,9 @@ def test_snowflake_connection():
         if "authentication" in error_str or "login" in error_str:
             print("  - Check your Snowflake credentials in .env file")
             print("  - Verify your username and account are correct")
-            if settings.snowflake_auth_method == "sso":
+            if settings and settings.snowflake_auth_method == "sso":
                 print("  - Make sure you complete the SSO authentication in your browser")
-            elif settings.snowflake_auth_method == "password":
+            elif settings and settings.snowflake_auth_method == "password":
                 print("  - Verify your password is correct")
         
         elif "network" in error_str or "connection" in error_str:
@@ -120,13 +122,17 @@ def test_snowflake_connection():
             print("  - Verify your Snowflake account is active")
             print("  - Try connecting with Snowflake's web interface first")
         
-        print(f"\n📋 Current configuration:")
-        print(f"  SNOWFLAKE_USER={settings.snowflake_user}")
-        print(f"  SNOWFLAKE_ACCOUNT={settings.snowflake_account}")
-        print(f"  SNOWFLAKE_WAREHOUSE={settings.snowflake_warehouse}")
-        print(f"  SNOWFLAKE_DATABASE={settings.snowflake_database}")
-        print(f"  SNOWFLAKE_SCHEMA={settings.snowflake_schema}")
-        print(f"  SNOWFLAKE_AUTH_METHOD={settings.snowflake_auth_method}")
+        # Only show configuration if settings were loaded successfully
+        if settings:
+            print(f"\n📋 Current configuration:")
+            print(f"  SNOWFLAKE_USER={settings.snowflake_user}")
+            print(f"  SNOWFLAKE_ACCOUNT={settings.snowflake_account}")
+            print(f"  SNOWFLAKE_WAREHOUSE={settings.snowflake_warehouse}")
+            print(f"  SNOWFLAKE_DATABASE={settings.snowflake_database}")
+            print(f"  SNOWFLAKE_SCHEMA={settings.snowflake_schema}")
+            print(f"  SNOWFLAKE_AUTH_METHOD={settings.snowflake_auth_method}")
+        else:
+            print(f"\n📋 Could not load configuration - check your .env file exists and is properly formatted")
         
         return False
 
