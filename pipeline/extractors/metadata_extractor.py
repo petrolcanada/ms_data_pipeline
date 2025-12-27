@@ -105,18 +105,9 @@ class SnowflakeMetadataExtractor:
             stats = cursor.fetchone()
             
             # Get primary key information
-            pk_query = f"""
-            SELECT COLUMN_NAME
-            FROM {database}.INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
-            JOIN {database}.INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu 
-                ON tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
-            WHERE tc.TABLE_SCHEMA = '{schema}' 
-            AND tc.TABLE_NAME = '{table}'
-            AND tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
-            """
-            
-            cursor.execute(pk_query)
-            primary_keys = [row[0] for row in cursor.fetchall()]
+            # Skipping primary key extraction for now
+            primary_keys = []
+            logger.debug(f"Primary key extraction skipped for {database}.{schema}.{table}")
             
             # Build metadata structure
             metadata = {
