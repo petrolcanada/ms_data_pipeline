@@ -17,11 +17,11 @@ class Settings(BaseSettings):
     snowflake_warehouse: str = Field(..., env="SNOWFLAKE_WAREHOUSE")
     snowflake_database: str = Field(..., env="SNOWFLAKE_DATABASE")
     snowflake_schema: str = Field(..., env="SNOWFLAKE_SCHEMA")
+    snowflake_role: Optional[str] = Field(None, env="SNOWFLAKE_ROLE")  # Optional role
     
     # Snowflake Authentication
     snowflake_auth_method: str = Field("sso", env="SNOWFLAKE_AUTH_METHOD")  # sso, password, key_pair, oauth
     snowflake_password: Optional[str] = Field(None, env="SNOWFLAKE_PASSWORD")
-    snowflake_sso_url: Optional[str] = Field(None, env="SNOWFLAKE_SSO_URL")
     snowflake_private_key_path: Optional[str] = Field(None, env="SNOWFLAKE_PRIVATE_KEY_PATH")
     snowflake_private_key_passphrase: Optional[str] = Field(None, env="SNOWFLAKE_PRIVATE_KEY_PASSPHRASE")
     
@@ -65,16 +65,25 @@ def get_snowflake_connection_params() -> dict:
     params = {
         "user": settings.snowflake_user,
         "account": settings.snowflake_account,
-        "warehouse": settings.snowflake_warehouse,
-        "database": settings.snowflake_database,
-        "schema": settings.snowflake_schema
     }
+    
+    # Add optional role if specified
+    if settings.snowflake_role:
+        params["role"] = settings.snowflake_role
+    
+    # Add warehouse, database, schema (optional - can be set after connection)
+    if settings.snowflake_warehouse:
+        params["warehouse"] = settings.snowflake_warehouse
+    if settings.snowflake_database:
+        params["database"] = settings.snowflake_database
+    if settings.snowflake_schema:
+        params["schema"] = settings.snowflake_schema
     
     # Add authentication-specific parameters
     if settings.snowflake_auth_method == "sso":
         params["authenticator"] = "externalbrowser"
-        if settings.snowflake_sso_url:
-            params["sso_url"] = settings.snowflake_sso_url
+        # Note: SSO will open a browser window for authentication
+        # Make sure you're running this in an environment with browser access
     elif settings.snowflake_auth_method == "password":
         if not settings.snowflake_password:
             raise ValueError("SNOWFLAKE_PASSWORD required when using password authentication")
