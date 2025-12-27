@@ -13,13 +13,13 @@ tables:
   #   encryption: true
   #   compression: true
 
-  - name: "fund_share_class_basic_info_all_funduniverse"
+  - name: "FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND"
     snowflake:
       database: "CIGAM_PRD_RL"
       schema: "MORNINGSTAR_MAIN"
       table: "FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND"
     postgres:
-      schema: "public"
+      schema: "ms"
       table: "FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND"
     sync_mode: "full"
     schedule: "daily"
