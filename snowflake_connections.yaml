@@ -1,0 +1,14 @@
+
+connections:
+  my_example_connection:
+    account: "CIX-CIX"
+    user: "PETER.LI@CI.COM"
+    authenticator: "externalbrowser"
+    role: "CIGAM_PRD_SNOWFLAKE_ANALYTICSSPECIALIST_DNA_FR"
+    warehouse: "CIGAM_PRD_ANALYTICSSPECIALIST_DNA_WH"
+    database: "CIGAM_PRD_RL"
+    schema: "MORNINGSTAR_MAIN"
+    region: "ca-central-1"        # Optional: specify if needed
+    client_session_keep_alive: true  # Optional: keep session alive
+    application: "PythonConnector"   # Optional: custom app name
+    timezone: "America/Toronto"      # Optional: set session timezone
