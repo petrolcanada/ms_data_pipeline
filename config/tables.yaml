@@ -15,12 +15,12 @@ tables:
 
   - name: "fund_share_class_basic_info_all_funduniverse"
     snowflake:
-      database: "CIGAM_SBX_PL"
-      schema: "DNA_ANALYTICS_INSIGHTS"
-      table: "FUND_SHARE_CLASS_BASIC_INFO_ALL_FUNDUNIVERSE"
+      database: "CIGAM_PRD_RL"
+      schema: "MORNINGSTAR_MAIN"
+      table: "FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND"
     postgres:
       schema: "public"
-      table: "fund_share_class_basic_info_all_funduniverse"
+      table: "FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND"
     sync_mode: "full"
     schedule: "daily"
     encryption: true
