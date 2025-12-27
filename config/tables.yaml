@@ -1,5 +1,6 @@
 # Snowflake Table Sync Configuration
 tables:
+  # Example with all optional fields
   # - name: "financial_data"
   #   snowflake:
   #     database: "PROD_DB"
@@ -8,10 +9,18 @@ tables:
   #   postgres:
   #     schema: "public"
   #     table: "financial_data"
-  #   sync_mode: "full"
+  #   sync_mode: "full"  # full, incremental
   #   schedule: "daily"
   #   encryption: true
   #   compression: true
+  #   # Optional: Offline transfer settings
+  #   export:
+  #     chunk_size: 100000        # Rows per chunk (default: 100000)
+  #     compression: "zstd"       # snappy, gzip, zstd (default: zstd)
+  #     compression_level: 3      # 1-9 (default: 3)
+  #   import:
+  #     batch_size: 10000         # Rows per batch insert (default: 10000)
+  #     verify_checksums: true    # Verify data integrity (default: true)
 
   - name: "FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND"
     snowflake:
@@ -25,3 +34,8 @@ tables:
     schedule: "daily"
     encryption: true
     compression: true
+    # Optional: Customize for this specific table
+    # export:
+    #   chunk_size: 50000         # Smaller chunks for this table
+    # import:
+    #   batch_size: 5000          # Smaller batches for this table
