@@ -1,7 +1,0 @@
-account = "CIX-CIX"
-user = "PETER.LI@CI.COM"
-authenticator = "externalbrowser"
-role = "CIGAM_PRD_SNOWFLAKE_ANALYTICSSPECIALIST_DNA_FR"
-warehouse = "CIGAM_PRD_ANALYTICSSPECIALIST_DNA_WH"
-database = "CIGAM_PRD_RL"
-schema = "MORNINGSTAR_MAIN"

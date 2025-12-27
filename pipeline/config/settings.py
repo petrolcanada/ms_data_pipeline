@@ -17,7 +17,10 @@ class Settings(BaseSettings):
     snowflake_warehouse: str = Field(..., env="SNOWFLAKE_WAREHOUSE")
     snowflake_database: str = Field(..., env="SNOWFLAKE_DATABASE")
     snowflake_schema: str = Field(..., env="SNOWFLAKE_SCHEMA")
-    snowflake_role: Optional[str] = Field(None, env="SNOWFLAKE_ROLE")  # Optional role
+    snowflake_role: str = Field(..., env="SNOWFLAKE_ROLE")  # Required for SSO
+    
+    # Optional Snowflake parameters
+    snowflake_region: Optional[str] = Field(None, env="SNOWFLAKE_REGION")
     
     # Snowflake Authentication
     snowflake_auth_method: str = Field("sso", env="SNOWFLAKE_AUTH_METHOD")  # sso, password, key_pair, oauth
@@ -58,32 +61,26 @@ def get_settings() -> Settings:
 
 # Convenience functions for specific connection strings
 def get_snowflake_connection_params() -> dict:
-    """Get Snowflake connection parameters as dictionary"""
+    """
+    Get Snowflake connection parameters as dictionary
+    Based on successful YAML connection practice
+    """
     settings = get_settings()
     
-    # Base connection parameters
+    # Base connection parameters (matching successful YAML practice)
     params = {
-        "user": settings.snowflake_user,
         "account": settings.snowflake_account,
+        "user": settings.snowflake_user,
+        "role": settings.snowflake_role,
+        "warehouse": settings.snowflake_warehouse,
+        "database": settings.snowflake_database,
+        "schema": settings.snowflake_schema,
     }
-    
-    # Add optional role if specified
-    if settings.snowflake_role:
-        params["role"] = settings.snowflake_role
-    
-    # Add warehouse, database, schema (optional - can be set after connection)
-    if settings.snowflake_warehouse:
-        params["warehouse"] = settings.snowflake_warehouse
-    if settings.snowflake_database:
-        params["database"] = settings.snowflake_database
-    if settings.snowflake_schema:
-        params["schema"] = settings.snowflake_schema
     
     # Add authentication-specific parameters
     if settings.snowflake_auth_method == "sso":
         params["authenticator"] = "externalbrowser"
-        # Note: SSO will open a browser window for authentication
-        # Make sure you're running this in an environment with browser access
+        # SSO will open a browser window for authentication
     elif settings.snowflake_auth_method == "password":
         if not settings.snowflake_password:
             raise ValueError("SNOWFLAKE_PASSWORD required when using password authentication")
@@ -95,10 +92,15 @@ def get_snowflake_connection_params() -> dict:
         if settings.snowflake_private_key_passphrase:
             params["private_key_file_pwd"] = settings.snowflake_private_key_passphrase
     elif settings.snowflake_auth_method == "oauth":
-        # OAuth implementation would go here
         raise NotImplementedError("OAuth authentication not yet implemented")
     else:
         raise ValueError(f"Unsupported authentication method: {settings.snowflake_auth_method}")
+    
+    # Add optional parameters for better connection management
+    # These improve connection stability and session management
+    params["client_session_keep_alive"] = True  # Keep session alive
+    params["login_timeout"] = 120  # 2 minutes for SSO login
+    params["network_timeout"] = 30  # 30 seconds for network operations
     
     return params
 

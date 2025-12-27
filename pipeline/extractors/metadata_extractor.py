@@ -20,18 +20,43 @@ class SnowflakeMetadataExtractor:
         self.metadata_dir.mkdir(parents=True, exist_ok=True)
         
     def connect_to_snowflake(self):
-        """Establish connection to Snowflake (VPN side) with SSO support"""
+        """
+        Establish connection to Snowflake (VPN side) with SSO support
+        Uses connection parameters matching successful YAML practice
+        """
         try:
-            # Get connection parameters based on auth method
+            # Get connection parameters based on settings
             conn_params = get_snowflake_connection_params()
             
+            logger.info(f"Connecting to Snowflake account: {self.settings.snowflake_account}")
+            logger.info(f"Using authentication method: {self.settings.snowflake_auth_method}")
+            
+            if self.settings.snowflake_auth_method == "sso":
+                logger.info("SSO authentication will open a browser window. Please complete authentication in your browser.")
+            
+            # Connect with parameters matching successful YAML practice
             conn = snowflake.connector.connect(**conn_params)
-            logger.info(f"Successfully connected to Snowflake using {self.settings.snowflake_auth_method} authentication")
+            
+            logger.info(f"✅ Successfully connected to Snowflake")
+            logger.info(f"   User: {self.settings.snowflake_user}")
+            logger.info(f"   Role: {self.settings.snowflake_role}")
+            logger.info(f"   Warehouse: {self.settings.snowflake_warehouse}")
+            logger.info(f"   Database: {self.settings.snowflake_database}")
+            logger.info(f"   Schema: {self.settings.snowflake_schema}")
+            
             return conn
+            
+        except snowflake.connector.errors.DatabaseError as e:
+            logger.error(f"Snowflake database error: {e}")
+            if "250001" in str(e):
+                logger.error("Could not connect to Snowflake backend. Check account identifier and VPN connection.")
+            elif "authentication" in str(e).lower():
+                logger.error("Authentication failed. Verify credentials and complete SSO in browser if prompted.")
+            raise
         except Exception as e:
             logger.error(f"Failed to connect to Snowflake: {e}")
-            if "externalbrowser" in str(e).lower():
-                logger.info("SSO authentication requires opening a browser window. Please complete the authentication in your browser.")
+            if "externalbrowser" in str(e).lower() or "browser" in str(e).lower():
+                logger.info("SSO authentication requires a browser. Ensure you're running in an environment with browser access.")
             raise
     
     def extract_table_metadata(self, database: str, schema: str, table: str) -> Dict[str, Any]:
@@ -40,6 +65,8 @@ class SnowflakeMetadataExtractor:
         cursor = conn.cursor()
         
         try:
+            logger.info(f"Extracting metadata for {database}.{schema}.{table}")
+            
             # Get table schema information
             schema_query = f"""
             SELECT 
@@ -59,6 +86,9 @@ class SnowflakeMetadataExtractor:
             
             cursor.execute(schema_query)
             columns = cursor.fetchall()
+            
+            if not columns:
+                raise ValueError(f"Table {database}.{schema}.{table} not found or has no columns")
             
             # Get table statistics
             stats_query = f"""
@@ -121,7 +151,10 @@ class SnowflakeMetadataExtractor:
                 }
                 metadata["columns"].append(column_info)
             
-            logger.info(f"Extracted metadata for {database}.{schema}.{table}")
+            logger.info(f"✅ Extracted metadata for {database}.{schema}.{table}")
+            logger.info(f"   Columns: {len(metadata['columns'])}")
+            logger.info(f"   Rows: {metadata['statistics']['row_count']:,}")
+            
             return metadata
             
         except Exception as e:
@@ -253,6 +286,8 @@ class SnowflakeMetadataExtractor:
             pg_config = table_config["postgres"]
             
             try:
+                logger.info(f"Processing table: {table_name}")
+                
                 # Extract metadata from Snowflake
                 metadata = self.extract_table_metadata(
                     sf_config["database"],
