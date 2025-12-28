@@ -88,6 +88,12 @@ def import_table(
     print(f"   Total rows: {manifest['total_rows']:,}")
     print(f"   Total chunks: {manifest['total_chunks']}")
     
+    # Display filter information if present
+    if manifest.get('snowflake_source', {}).get('filter'):
+        print(f"   Filter used: {manifest['snowflake_source']['filter']}")
+    else:
+        print(f"   Filter: None (all data exported)")
+    
     # Initialize components
     encryptor = FileEncryptor()
     loader = PostgreSQLDataLoader()

@@ -29,9 +29,74 @@ class SnowflakeDataExtractor:
             logger.error(f"Failed to connect to Snowflake: {e}")
             raise
     
-    def estimate_table_size(self, database: str, schema: str, table: str) -> Dict[str, Any]:
+    def _build_filter_clause(self, filter_config) -> str:
+        """
+        Build SQL filter clause from configuration
+        
+        Args:
+            filter_config: String or list of filter conditions
+            
+        Returns:
+            Complete WHERE clause or empty string
+        """
+        if not filter_config:
+            return ""
+        
+        # Handle single string filter
+        if isinstance(filter_config, str):
+            filter_str = filter_config.strip()
+            if not filter_str:
+                return ""
+            # If it already starts with WHERE, use as-is
+            if filter_str.upper().startswith("WHERE"):
+                return filter_str
+            # Otherwise, prepend WHERE
+            return f"WHERE {filter_str}"
+        
+        # Handle list of filters
+        if isinstance(filter_config, list):
+            # Filter out empty strings
+            filters = [f.strip() for f in filter_config if f and f.strip()]
+            
+            if not filters:
+                return ""
+            
+            # Process first filter
+            first_filter = filters[0]
+            if first_filter.upper().startswith("WHERE"):
+                result = first_filter
+            else:
+                result = f"WHERE {first_filter}"
+            
+            # Process remaining filters
+            for filter_item in filters[1:]:
+                # If it starts with AND/OR, use as-is
+                if filter_item.upper().startswith(("AND", "OR")):
+                    result += f" {filter_item}"
+                else:
+                    # Otherwise, prepend AND
+                    result += f" AND {filter_item}"
+            
+            return result
+        
+        logger.warning(f"Invalid filter configuration type: {type(filter_config)}")
+        return ""
+    
+    def estimate_table_size(
+        self, 
+        database: str, 
+        schema: str, 
+        table: str,
+        filter_clause: str = None
+    ) -> Dict[str, Any]:
         """
         Estimate table size and row count
+        
+        Args:
+            database: Snowflake database name
+            schema: Snowflake schema name
+            table: Snowflake table name
+            filter_clause: Optional WHERE clause to filter rows
         
         Returns:
             Dictionary with row_count, size_bytes, size_mb
@@ -40,34 +105,80 @@ class SnowflakeDataExtractor:
         cursor = conn.cursor()
         
         try:
-            query = f"""
-            SELECT 
-                ROW_COUNT,
-                BYTES
-            FROM {database}.INFORMATION_SCHEMA.TABLES 
-            WHERE TABLE_SCHEMA = '{schema}' 
-            AND TABLE_NAME = '{table}'
-            """
-            
-            cursor.execute(query)
-            result = cursor.fetchone()
-            
-            if result:
-                row_count = result[0] or 0
-                size_bytes = result[1] or 0
-                size_mb = size_bytes / (1024 * 1024)
+            # If filter is provided, count filtered rows
+            if filter_clause:
+                count_query = f"""
+                SELECT COUNT(*) 
+                FROM {database}.{schema}.{table}
+                {filter_clause}
+                """
                 
-                logger.info(f"Table {database}.{schema}.{table}:")
-                logger.info(f"  Rows: {row_count:,}")
-                logger.info(f"  Size: {size_mb:.2f} MB")
+                logger.info(f"Counting filtered rows with query: {count_query}")
+                cursor.execute(count_query)
+                row_count = cursor.fetchone()[0] or 0
+                
+                # Estimate size based on filtered row count
+                # Get average row size from table metadata
+                metadata_query = f"""
+                SELECT BYTES, ROW_COUNT
+                FROM {database}.INFORMATION_SCHEMA.TABLES 
+                WHERE TABLE_SCHEMA = '{schema}' 
+                AND TABLE_NAME = '{table}'
+                """
+                cursor.execute(metadata_query)
+                result = cursor.fetchone()
+                
+                if result and result[1] and result[1] > 0:
+                    total_bytes = result[0] or 0
+                    total_rows = result[1]
+                    avg_row_size = total_bytes / total_rows
+                    estimated_bytes = int(avg_row_size * row_count)
+                else:
+                    estimated_bytes = 0
+                
+                size_mb = estimated_bytes / (1024 * 1024)
+                
+                logger.info(f"Filtered table {database}.{schema}.{table}:")
+                logger.info(f"  Filtered rows: {row_count:,}")
+                logger.info(f"  Estimated size: {size_mb:.2f} MB")
                 
                 return {
                     "row_count": row_count,
-                    "size_bytes": size_bytes,
-                    "size_mb": size_mb
+                    "size_bytes": estimated_bytes,
+                    "size_mb": size_mb,
+                    "filtered": True
                 }
             else:
-                raise ValueError(f"Table {database}.{schema}.{table} not found")
+                # No filter - use table metadata
+                query = f"""
+                SELECT 
+                    ROW_COUNT,
+                    BYTES
+                FROM {database}.INFORMATION_SCHEMA.TABLES 
+                WHERE TABLE_SCHEMA = '{schema}' 
+                AND TABLE_NAME = '{table}'
+                """
+                
+                cursor.execute(query)
+                result = cursor.fetchone()
+                
+                if result:
+                    row_count = result[0] or 0
+                    size_bytes = result[1] or 0
+                    size_mb = size_bytes / (1024 * 1024)
+                    
+                    logger.info(f"Table {database}.{schema}.{table}:")
+                    logger.info(f"  Rows: {row_count:,}")
+                    logger.info(f"  Size: {size_mb:.2f} MB")
+                    
+                    return {
+                        "row_count": row_count,
+                        "size_bytes": size_bytes,
+                        "size_mb": size_mb,
+                        "filtered": False
+                    }
+                else:
+                    raise ValueError(f"Table {database}.{schema}.{table} not found")
                 
         finally:
             cursor.close()
@@ -79,7 +190,8 @@ class SnowflakeDataExtractor:
         schema: str, 
         table: str, 
         chunk_size: int = 100000,
-        order_by: str = None
+        order_by: str = None,
+        filter_clause: str = None
     ) -> Generator[pd.DataFrame, None, None]:
         """
         Extract table data in chunks
@@ -90,6 +202,7 @@ class SnowflakeDataExtractor:
             table: Snowflake table name
             chunk_size: Number of rows per chunk
             order_by: Column to order by (for consistent chunking)
+            filter_clause: Optional WHERE clause to filter rows
             
         Yields:
             DataFrame chunks
@@ -101,11 +214,19 @@ class SnowflakeDataExtractor:
             # Build query
             query = f"SELECT * FROM {database}.{schema}.{table}"
             
+            # Add filter clause if provided
+            if filter_clause:
+                query += f" {filter_clause}"
+            
+            # Add order by if provided
             if order_by:
                 query += f" ORDER BY {order_by}"
             
             logger.info(f"Extracting data from {database}.{schema}.{table}")
+            if filter_clause:
+                logger.info(f"  Filter: {filter_clause}")
             logger.info(f"  Chunk size: {chunk_size:,} rows")
+            logger.info(f"  Query: {query}")
             
             # Execute query
             cursor.execute(query)
@@ -137,6 +258,7 @@ class SnowflakeDataExtractor:
             
         except Exception as e:
             logger.error(f"Failed to extract data: {e}")
+            logger.error(f"Query was: {query}")
             raise
         finally:
             cursor.close()

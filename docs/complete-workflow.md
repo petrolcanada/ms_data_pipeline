@@ -79,7 +79,45 @@ metadata/
 
 ## **Phase 2: Data Export (Snowflake Side)**
 
-### **Step 2.1: Export Data**
+### **Step 2.1: Configure Filters (Optional)**
+
+Before exporting, you can optionally configure filters in `config/tables.yaml` to extract only specific data:
+
+**Example 1: Single filter condition**
+```yaml
+tables:
+  - name: "FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND"
+    snowflake:
+      database: "CIGAM_PRD_RL"
+      schema: "MORNINGSTAR_MAIN"
+      table: "FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND"
+      filter: "WHERE SECID IN (SELECT SECID FROM CIGAM_PRD_RL.MORNINGSTAR_MAIN.VW_ACTIVE_FUNDS)"
+```
+
+**Example 2: Multiple filter conditions (recommended)**
+```yaml
+tables:
+  - name: "FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND"
+    snowflake:
+      database: "CIGAM_PRD_RL"
+      schema: "MORNINGSTAR_MAIN"
+      table: "FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND"
+      filter:
+        - "WHERE SECID IN (SELECT SECID FROM CIGAM_PRD_RL.MORNINGSTAR_MAIN.VW_ACTIVE_FUNDS)"
+        - "AND _TIMESTAMPTO LIKE '%9999%'"
+```
+
+**Example 3: Simplified syntax (WHERE/AND auto-added)**
+```yaml
+filter:
+  - "SECID IN (SELECT SECID FROM VW_ACTIVE_FUNDS)"
+  - "_TIMESTAMPTO LIKE '%9999%'"
+  - "STATUS = 'ACTIVE'"
+```
+
+All three formats are supported. Filters are optional - omit the `filter` field to export all data.
+
+### **Step 2.2: Export Data**
 
 ```bash
 # Export all tables
@@ -109,11 +147,19 @@ D:/snowflake_exports/
 ```
 
 **What this does:**
-- ✅ Extracts data from Snowflake in chunks
+- ✅ Reads filter configuration from tables.yaml (if specified)
+- ✅ Builds SQL WHERE clause from filter(s)
+- ✅ Extracts filtered data from Snowflake in chunks
 - ✅ Compresses data (Parquet + zstd)
 - ✅ Encrypts files (AES-256-GCM)
-- ✅ Generates manifest with checksums
+- ✅ Generates manifest with checksums and filter information
 - ✅ Saves to local directory
+
+**Filter Benefits:**
+- Reduces data transfer volume
+- Extracts only relevant records
+- Supports complex SQL conditions
+- Documented in manifest for audit trail
 
 ---
 
@@ -259,6 +305,7 @@ IMPORTING TABLE: financial_data
    Export date: 2024-01-15T10:30:00Z
    Total rows: 1,234,567
    Total chunks: 3
+   Filter used: WHERE SECID IN (SELECT SECID FROM VW_ACTIVE_FUNDS) AND _TIMESTAMPTO LIKE '%9999%'
 
 🔄 Processing 3 chunks...
 

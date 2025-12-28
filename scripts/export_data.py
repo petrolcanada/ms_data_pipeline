@@ -85,15 +85,29 @@ def export_table(
     extractor = SnowflakeDataExtractor()
     encryptor = FileEncryptor()
     
+    # Build filter clause from configuration
+    filter_config = sf_config.get('filter')
+    filter_clause = extractor._build_filter_clause(filter_config)
+    
+    if filter_clause:
+        print(f"\n🔍 Filter: {filter_clause}")
+        logger.info(f"Using filter: {filter_clause}")
+    else:
+        print(f"\n📊 Extracting all data (no filter)")
+    
     # Estimate table size
     print("\n🔄 Estimating table size...")
     size_info = extractor.estimate_table_size(
         sf_config['database'],
         sf_config['schema'],
-        sf_config['table']
+        sf_config['table'],
+        filter_clause=filter_clause
     )
     
-    print(f"✅ Table size: {size_info['row_count']:,} rows ({size_info['size_mb']:.2f} MB)")
+    if size_info.get('filtered'):
+        print(f"✅ Filtered table size: {size_info['row_count']:,} rows ({size_info['size_mb']:.2f} MB estimated)")
+    else:
+        print(f"✅ Table size: {size_info['row_count']:,} rows ({size_info['size_mb']:.2f} MB)")
     
     # Extract and process chunks
     print(f"\n🔄 Extracting data in chunks of {chunk_size:,} rows...")
@@ -106,7 +120,8 @@ def export_table(
         sf_config['database'],
         sf_config['schema'],
         sf_config['table'],
-        chunk_size=chunk_size
+        chunk_size=chunk_size,
+        filter_clause=filter_clause
     ):
         chunk_num += 1
         total_rows += len(df_chunk)
@@ -159,7 +174,8 @@ def export_table(
         "snowflake_source": {
             "database": sf_config['database'],
             "schema": sf_config['schema'],
-            "table": sf_config['table']
+            "table": sf_config['table'],
+            "filter": filter_clause if filter_clause else None
         },
         "encryption": {
             "algorithm": "AES-256-GCM",
@@ -183,6 +199,8 @@ def export_table(
     print("=" * 70)
     print(f"📁 Location: {export_dir}")
     print(f"📊 Total: {total_rows:,} rows in {chunk_num} chunks")
+    if filter_clause:
+        print(f"🔍 Filter applied: {filter_clause}")
     
     total_size = sum(c['size_bytes'] for c in chunks_metadata)
     print(f"💾 Size: {total_size / (1024*1024):.2f} MB (encrypted)")
