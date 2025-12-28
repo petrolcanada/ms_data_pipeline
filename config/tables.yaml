@@ -10,15 +10,9 @@ tables:
       # filter: "WHERE SECID IN (SELECT SECID FROM CIGAM_PRD_RL.MORNINGSTAR_MAIN.VW_ACTIVE_FUNDS)"
       
       # Multiple filters (list) - recommended for complex conditions:
-      # filter:
-      #   - "WHERE SECID IN (SELECT SECID FROM CIGAM_PRD_RL.MORNINGSTAR_MAIN.VW_ACTIVE_FUNDS)"
-      #   - "AND _TIMESTAMPTO LIKE '%9999%'"
-      
-      # Alternative: List without WHERE/AND prefix (auto-added):
-      # filter:
-      #   - "SECID IN (SELECT SECID FROM CIGAM_PRD_RL.MORNINGSTAR_MAIN.VW_ACTIVE_FUNDS)"
-      #   - "_TIMESTAMPTO LIKE '%9999%'"
-      #   - "STATUS = 'ACTIVE'"
+      filter:
+        - "where _id in (select mstarid from CIGAM_SBX_PL.DNA_ANALYTICS_INSIGHTS_INVESTMENT_PRODUCT.V_MSTAR_PEERS_FCLASS_ETF_ID_CA_OPENEND)"
+        # - "AND _TIMESTAMPTO LIKE '%9999%'"
     postgres:
       schema: "ms"
       table: "FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND"
