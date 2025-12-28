@@ -304,12 +304,16 @@ class SnowflakeMetadataExtractor:
             
             if comparison is None:
                 # First extraction
-                self.change_logger.log_initial_extraction(table_name, metadata)
+                self.change_logger.log_initial_extraction(table_name)
             elif comparison["has_changes"]:
                 # Archive old files before saving new ones
                 self.archive_old_metadata(table_name)
                 # Log the changes
-                self.change_logger.log_change(table_name, comparison)
+                self.change_logger.log_change(
+                    table_name, 
+                    comparison["changes"], 
+                    comparison["summary"]
+                )
         
         with open(metadata_file, 'w') as f:
             json.dump(metadata, f, indent=2, default=str)
