@@ -56,6 +56,7 @@ class Settings(BaseSettings):
     compression_type: str = Field("zstd", env="COMPRESSION_TYPE")
     compression_level: int = Field(3, env="COMPRESSION_LEVEL")
     encryption_iterations: int = Field(100000, env="KEY_DERIVATION_ITERATIONS")
+    obfuscate_names: bool = Field(False, env="OBFUSCATE_NAMES")  # Enable name obfuscation
     
     class Config:
         env_file = ".env"

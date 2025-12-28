@@ -13,13 +13,29 @@ Quick reference for all data pipeline commands.
 # Extract metadata for all tables
 python scripts/extract_metadata.py --all
 
+# Extract with change detection (recommended)
+python scripts/extract_metadata.py --all --check-changes
+
+# Force re-extraction even if no changes
+python scripts/extract_metadata.py --all --check-changes --force
+
 # Extract metadata for specific table
 python scripts/extract_metadata.py --table FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND
 ```
 
+**Options:**
+- `--all` - Extract metadata for all configured tables
+- `--check-changes` - Enable change detection and alerting
+- `--force` - Force re-extraction even if no changes detected
+- `--create-postgres` - Also create PostgreSQL tables after extraction
+- `--drop-existing` - Drop existing PostgreSQL tables before creation
+
 **Output:**
 - `metadata/schemas/{table_name}_metadata.json`
 - `metadata/ddl/{table_name}_create.sql`
+- `metadata/schemas/{table_name}_{YYYYMMDD}_metadata.json` (archived if changed)
+- `metadata/ddl/{table_name}_{YYYYMMDD}_create.sql` (archived if changed)
+- `metadata/changes/{table_name}_changes.log` (change history)
 
 ---
 
@@ -200,6 +216,10 @@ cat D:/snowflake_exports/FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND/manifest.json
 ```bash
 --all                    # Extract metadata for all tables in config
 --table <name>           # Extract metadata for specific table
+--check-changes          # Enable change detection and alerting
+--force                  # Force re-extraction even if no changes detected
+--create-postgres        # Also create PostgreSQL tables after extraction
+--drop-existing          # Drop existing PostgreSQL tables before creation
 ```
 
 ### **export_data.py**

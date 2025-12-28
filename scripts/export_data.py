@@ -14,12 +14,15 @@ import argparse
 import getpass
 from pathlib import Path
 from datetime import datetime
+from typing import Optional
 
 # Add project root to path
 sys.path.append(str(Path(__file__).parent.parent))
 
 from pipeline.extractors.data_extractor import SnowflakeDataExtractor
 from pipeline.transformers.encryptor import FileEncryptor
+from pipeline.transformers.obfuscator import DataObfuscator
+from pipeline.connections import SnowflakeConnectionManager
 from pipeline.config.settings import get_settings
 from pipeline.utils.logger import get_logger
 import yaml
@@ -53,6 +56,8 @@ def export_table(
     table_config: dict,
     password: str,
     export_base_dir: str,
+    conn_manager: SnowflakeConnectionManager,
+    obfuscator: Optional[DataObfuscator] = None,
     chunk_size: int = 100000,
     compression: str = 'zstd',
     compression_level: int = 3
@@ -64,25 +69,43 @@ def export_table(
         table_config: Table configuration from tables.yaml
         password: Encryption password
         export_base_dir: Base export directory
+        conn_manager: Snowflake connection manager
+        obfuscator: Optional DataObfuscator for name obfuscation
         chunk_size: Rows per chunk
         compression: Compression algorithm
         compression_level: Compression level
+        
+    Returns:
+        Dictionary with export metadata including folder_id and manifest_file_id if obfuscated
     """
     table_name = table_config['name']
     sf_config = table_config['snowflake']
     
+    # Check if obfuscation is enabled
+    use_obfuscation = obfuscator is not None
+    
     print("\n" + "=" * 70)
     print(f"EXPORTING TABLE: {table_name}")
+    if use_obfuscation:
+        print("🔒 Name obfuscation: ENABLED")
     print("=" * 70)
     
+    # Generate folder name (obfuscated or original)
+    if use_obfuscation:
+        folder_name = obfuscator.generate_folder_id(table_name)
+        print(f"📁 Export folder: {folder_name} (obfuscated)")
+    else:
+        folder_name = table_name
+        print(f"📁 Export folder: {folder_name}")
+    
     # Create export directory
-    export_dir = Path(export_base_dir) / table_name
+    export_dir = Path(export_base_dir) / folder_name
     export_dir.mkdir(parents=True, exist_ok=True)
     
     logger.info(f"Export directory: {export_dir}")
     
-    # Initialize components
-    extractor = SnowflakeDataExtractor()
+    # Initialize components with connection manager
+    extractor = SnowflakeDataExtractor(conn_manager)
     encryptor = FileEncryptor()
     
     # Build filter clause from configuration
@@ -95,7 +118,7 @@ def export_table(
     else:
         print(f"\n📊 Extracting all data (no filter)")
     
-    # Estimate table size
+    # Estimate table size (uses connection manager)
     print("\n🔄 Estimating table size...")
     size_info = extractor.estimate_table_size(
         sf_config['database'],
@@ -109,12 +132,13 @@ def export_table(
     else:
         print(f"✅ Table size: {size_info['row_count']:,} rows ({size_info['size_mb']:.2f} MB)")
     
-    # Extract and process chunks
+    # Extract and process chunks (reuses connection)
     print(f"\n🔄 Extracting data in chunks of {chunk_size:,} rows...")
     
     chunks_metadata = []
     chunk_num = 0
     total_rows = 0
+    file_mappings = {}  # Maps obfuscated file names to chunk info
     
     for df_chunk in extractor.extract_table_chunks(
         sf_config['database'],
@@ -126,10 +150,19 @@ def export_table(
         chunk_num += 1
         total_rows += len(df_chunk)
         
-        # Save as Parquet
-        parquet_file = export_dir / f"data_chunk_{chunk_num:03d}.parquet"
+        # Generate file name (obfuscated or original)
+        if use_obfuscation:
+            file_id = obfuscator.generate_file_id(chunk_num)
+            parquet_file = export_dir / f"{file_id}.parquet"
+            encrypted_file = export_dir / f"{file_id}.enc"
+        else:
+            parquet_file = export_dir / f"data_chunk_{chunk_num:03d}.parquet"
+            encrypted_file = export_dir / f"data_chunk_{chunk_num:03d}.parquet.enc"
+        
         print(f"\n📦 Processing chunk {chunk_num}...")
         print(f"   Rows: {len(df_chunk):,}")
+        if use_obfuscation:
+            print(f"   File: {encrypted_file.name} (obfuscated)")
         
         parquet_info = extractor.save_chunk_to_parquet(
             df_chunk,
@@ -141,7 +174,6 @@ def export_table(
         print(f"   Compressed: {parquet_info['size_mb']:.2f} MB")
         
         # Encrypt file
-        encrypted_file = export_dir / f"data_chunk_{chunk_num:03d}.parquet.enc"
         print(f"   🔐 Encrypting...")
         
         encryption_info = encryptor.encrypt_file(
@@ -156,14 +188,22 @@ def export_table(
         parquet_file.unlink()
         
         # Store chunk metadata
-        chunks_metadata.append({
+        chunk_metadata = {
             "chunk_number": chunk_num,
             "file": encrypted_file.name,
             "rows": len(df_chunk),
             "size_bytes": encryption_info['encrypted_size'],
             "checksum_sha256": encryption_info['checksum_sha256'],
             "encrypted": True
-        })
+        }
+        chunks_metadata.append(chunk_metadata)
+        
+        # Store file mapping if obfuscated
+        if use_obfuscation:
+            file_mappings[encrypted_file.name] = {
+                "chunk_number": chunk_num,
+                "rows": len(df_chunk)
+            }
     
     # Create manifest
     manifest = {
@@ -171,6 +211,7 @@ def export_table(
         "export_timestamp": datetime.utcnow().isoformat() + "Z",
         "total_rows": total_rows,
         "total_chunks": chunk_num,
+        "obfuscation_enabled": use_obfuscation,
         "snowflake_source": {
             "database": sf_config['database'],
             "schema": sf_config['schema'],
@@ -190,14 +231,46 @@ def export_table(
         "chunks": chunks_metadata
     }
     
-    manifest_file = export_dir / "manifest.json"
-    with open(manifest_file, 'w') as f:
-        json.dump(manifest, f, indent=2)
+    # Add file mappings if obfuscated
+    if use_obfuscation:
+        manifest["file_mappings"] = file_mappings
+    
+    # Save manifest (encrypted if obfuscation enabled, plain if not)
+    manifest_file_id = None
+    if use_obfuscation:
+        # Generate random manifest file ID
+        manifest_file_id = obfuscator.generate_manifest_id(table_name)
+        
+        # Save as temporary JSON
+        temp_manifest = export_dir / "manifest.json.tmp"
+        with open(temp_manifest, 'w') as f:
+            json.dump(manifest, f, indent=2)
+        
+        # Encrypt manifest
+        manifest_file = export_dir / f"{manifest_file_id}.enc"
+        print(f"\n🔐 Encrypting manifest as {manifest_file.name}...")
+        
+        encryptor.encrypt_file(temp_manifest, manifest_file, password)
+        
+        # Remove temporary file
+        temp_manifest.unlink()
+        
+        logger.info(f"Manifest encrypted: {manifest_file}")
+    else:
+        # Save as plain JSON (backward compatibility)
+        manifest_file = export_dir / "manifest.json"
+        with open(manifest_file, 'w') as f:
+            json.dump(manifest, f, indent=2)
+        
+        logger.info(f"Manifest saved: {manifest_file}")
     
     print("\n" + "=" * 70)
     print("✅ EXPORT COMPLETE!")
     print("=" * 70)
     print(f"📁 Location: {export_dir}")
+    if use_obfuscation:
+        print(f"🔒 Folder ID: {folder_name}")
+        print(f"🔒 Manifest ID: {manifest_file_id}")
     print(f"📊 Total: {total_rows:,} rows in {chunk_num} chunks")
     if filter_clause:
         print(f"🔍 Filter applied: {filter_clause}")
@@ -205,10 +278,20 @@ def export_table(
     total_size = sum(c['size_bytes'] for c in chunks_metadata)
     print(f"💾 Size: {total_size / (1024*1024):.2f} MB (encrypted)")
     print(f"🔐 Encryption: AES-256-GCM with PBKDF2 ({encryptor.iterations:,} iterations)")
+    if use_obfuscation:
+        print(f"🔒 Names: Obfuscated (all files encrypted)")
     print(f"⚠️  Remember your password - it's not stored anywhere!")
     print("=" * 70)
     
-    return manifest
+    # Return export metadata
+    return {
+        "table_name": table_name,
+        "folder_id": folder_name if use_obfuscation else None,
+        "manifest_file_id": manifest_file_id,
+        "export_timestamp": manifest["export_timestamp"],
+        "total_rows": total_rows,
+        "total_chunks": chunk_num
+    }
 
 
 def main():
@@ -234,6 +317,16 @@ def main():
         default=100000,
         help="Rows per chunk (default: 100000)"
     )
+    parser.add_argument(
+        "--obfuscate",
+        action="store_true",
+        help="Enable name obfuscation for folders and files"
+    )
+    parser.add_argument(
+        "--no-obfuscate",
+        action="store_true",
+        help="Disable name obfuscation (use original names)"
+    )
     
     args = parser.parse_args()
     
@@ -241,10 +334,23 @@ def main():
         print("Error: Must specify either --table <name> or --all")
         sys.exit(1)
     
+    if args.obfuscate and args.no_obfuscate:
+        print("Error: Cannot specify both --obfuscate and --no-obfuscate")
+        sys.exit(1)
+    
     try:
         # Get settings
         settings = get_settings()
         export_base_dir = getattr(settings, 'export_base_dir', 'exports')
+        
+        # Determine if obfuscation should be enabled
+        # Priority: command line args > settings > default (False)
+        if args.obfuscate:
+            use_obfuscation = True
+        elif args.no_obfuscate:
+            use_obfuscation = False
+        else:
+            use_obfuscation = getattr(settings, 'obfuscate_names', False)
         
         # Get password
         password = get_password(args.password_file)
@@ -253,48 +359,120 @@ def main():
         with open("config/tables.yaml", 'r') as f:
             config = yaml.safe_load(f)
         
-        # Export tables
-        if args.table:
-            # Export single table
-            table_config = next(
-                (t for t in config['tables'] if t['name'] == args.table),
-                None
-            )
-            
-            if not table_config:
-                print(f"Error: Table '{args.table}' not found in config/tables.yaml")
-                sys.exit(1)
-            
-            export_table(
-                table_config,
-                password,
-                export_base_dir,
-                chunk_size=args.chunk_size
-            )
+        # Initialize obfuscator if needed
+        obfuscator = None
+        if use_obfuscation:
+            obfuscator = DataObfuscator()
+            print("\n🔒 Name obfuscation: ENABLED")
+            print("   Folder and file names will be randomized")
+            print("   Master index will be created: .export_index.enc")
         else:
-            # Export all tables
-            print(f"\n{'=' * 70}")
-            print(f"EXPORTING {len(config['tables'])} TABLES")
-            print(f"{'=' * 70}")
+            print("\n📁 Name obfuscation: DISABLED")
+            print("   Using original table names for folders")
+        
+        # Create single Snowflake connection for all operations
+        print("\n🔐 Connecting to Snowflake...")
+        with SnowflakeConnectionManager() as conn_manager:
+            print("✅ Connected to Snowflake (SSO authentication complete)")
             
-            for table_config in config['tables']:
-                try:
-                    export_table(
-                        table_config,
-                        password,
-                        export_base_dir,
-                        chunk_size=args.chunk_size
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to export {table_config['name']}: {e}")
-                    print(f"\n❌ Failed to export {table_config['name']}: {e}")
+            # Track table mappings for master index
+            table_mappings = []
             
-            print(f"\n{'=' * 70}")
-            print("ALL EXPORTS COMPLETE")
-            print(f"{'=' * 70}")
+            # Export tables
+            if args.table:
+                # Export single table
+                table_config = next(
+                    (t for t in config['tables'] if t['name'] == args.table),
+                    None
+                )
+                
+                if not table_config:
+                    print(f"Error: Table '{args.table}' not found in config/tables.yaml")
+                    sys.exit(1)
+                
+                export_result = export_table(
+                    table_config,
+                    password,
+                    export_base_dir,
+                    conn_manager,
+                    obfuscator=obfuscator,
+                    chunk_size=args.chunk_size
+                )
+                
+                # Add to table mappings if obfuscated
+                if use_obfuscation:
+                    table_mappings.append({
+                        "table_name": export_result["table_name"],
+                        "folder_id": export_result["folder_id"],
+                        "manifest_file_id": export_result["manifest_file_id"],
+                        "export_timestamp": export_result["export_timestamp"],
+                        "total_rows": export_result["total_rows"],
+                        "total_chunks": export_result["total_chunks"]
+                    })
+            else:
+                # Export all tables
+                print(f"\n{'=' * 70}")
+                print(f"EXPORTING {len(config['tables'])} TABLES")
+                print(f"{'=' * 70}")
+                
+                for table_config in config['tables']:
+                    try:
+                        export_result = export_table(
+                            table_config,
+                            password,
+                            export_base_dir,
+                            conn_manager,
+                            obfuscator=obfuscator,
+                            chunk_size=args.chunk_size
+                        )
+                        
+                        # Add to table mappings if obfuscated
+                        if use_obfuscation:
+                            table_mappings.append({
+                                "table_name": export_result["table_name"],
+                                "folder_id": export_result["folder_id"],
+                                "manifest_file_id": export_result["manifest_file_id"],
+                                "export_timestamp": export_result["export_timestamp"],
+                                "total_rows": export_result["total_rows"],
+                                "total_chunks": export_result["total_chunks"]
+                            })
+                    except Exception as e:
+                        logger.error(f"Failed to export {table_config['name']}: {e}")
+                        print(f"\n❌ Failed to export {table_config['name']}: {e}")
+                
+                print(f"\n{'=' * 70}")
+                print("ALL EXPORTS COMPLETE")
+                print(f"{'=' * 70}")
+            
+            # Create master index if obfuscation is enabled
+            if use_obfuscation and table_mappings:
+                print(f"\n{'=' * 70}")
+                print("CREATING MASTER INDEX")
+                print(f"{'=' * 70}")
+                
+                master_index_path = Path(export_base_dir) / "index.enc"
+                index_info = obfuscator.create_master_index(
+                    table_mappings,
+                    master_index_path,
+                    password
+                )
+                
+                print(f"✅ Master index created: {master_index_path}")
+                print(f"   Tables: {index_info['table_count']}")
+                print(f"   Size: {index_info['size_bytes'] / 1024:.2f} KB")
+                print(f"   Checksum: {index_info['checksum_sha256'][:16]}...")
+                print(f"\n⚠️  Keep this file with your exports!")
+                print(f"   It maps obfuscated folder names to table names")
+                print(f"   It also contains manifest file IDs for each table")
+                print(f"{'=' * 70}")
+        
+        # Connection automatically closed when exiting context manager
+        print("\n✅ Snowflake connection closed")
         
         print("\n📋 Next steps:")
         print(f"1. Copy {export_base_dir}/ folder to PostgreSQL server")
+        if use_obfuscation:
+            print(f"   (includes index.enc - required for import!)")
         print(f"2. Run: python scripts/import_data.py --table {args.table or '<table_name>'}")
         
     except KeyboardInterrupt:

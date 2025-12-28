@@ -14,6 +14,10 @@ tables:
       database: "PROD_DB"
       schema: "PUBLIC" 
       table: "FINANCIAL_DATA"
+      # Optional: Filter data during export
+      filter:
+        - "WHERE SECID IN (SELECT SECID FROM PUBLIC.VW_ACTIVE_FUNDS)"
+        - "AND _TIMESTAMPTO LIKE '%9999%'"
     postgres:
       schema: "public"
       table: "financial_data"
@@ -22,6 +26,17 @@ tables:
     encryption: true
     compression: true
 ```
+
+**Filter Options:**
+- **No filter**: Omit the `filter` field to export all data
+- **Single filter**: `filter: "WHERE column = value"`
+- **Multiple filters**: Use a list to combine conditions with AND
+  ```yaml
+  filter:
+    - "WHERE id IN (SELECT id FROM view)"
+    - "AND status = 'ACTIVE'"
+    - "AND date > '2024-01-01'"
+  ```
 
 ### 2. Extract Metadata from Snowflake (VPN Side)
 Run the metadata extraction script to connect to Snowflake and extract table schemas:
@@ -80,6 +95,7 @@ financial-data-management/
 3. **Version Controlled**: All metadata and DDL saved in the repository
 4. **Cross-Network**: Metadata extraction on VPN side, table creation on external side
 5. **Verification**: Automatically verifies PostgreSQL tables match Snowflake schemas
+6. **Name Obfuscation**: Optional feature to randomize folder and file names for enhanced security
 
 ## Example Workflow
 
@@ -88,15 +104,82 @@ financial-data-management/
 vim config/tables.yaml
 
 # 2. Extract metadata from Snowflake (run on VPN side)
-python scripts/extract_metadata.py --all
+python scripts/extract_metadata.py --all --check-changes
 
-# 3. Create PostgreSQL tables (can run on external side)
+# 3. Export data (optionally with name obfuscation)
+python scripts/export_data.py --all --obfuscate
+
+# 4. Create PostgreSQL tables (can run on external side)
 python scripts/extract_metadata.py --all --create-postgres
 
-# 4. Verify everything worked
+# 5. Import data
+python scripts/import_data.py --all
+
+# 6. Verify everything worked
 ls metadata/schemas/  # Check metadata files
 ls metadata/ddl/      # Check DDL files
 ```
+
+## Metadata Change Tracking
+
+Monitor table schema changes over time with automatic detection and alerting:
+
+```bash
+# Check for metadata changes
+python scripts/extract_metadata.py --all --check-changes
+```
+
+**What it tracks:**
+- Column additions/removals
+- Data type changes
+- NULL constraint changes
+- Column position changes
+- Constraint modifications
+
+**When changes are detected:**
+- Displays detailed alert with all changes
+- Archives old metadata with timestamp: `{table}_{YYYYMMDD}_metadata.json`
+- Archives old DDL with timestamp: `{table}_{YYYYMMDD}_create.sql`
+- Logs changes to: `metadata/changes/{table}_changes.log`
+- Updates current files with new metadata
+
+**Example alert:**
+```
+⚠️  METADATA CHANGES DETECTED!
+Table: FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND
+Summary: 1 column added
+
+Detailed Changes:
+  + Column added: RISK_RATING (VARCHAR(50))
+
+Archived old metadata:
+  • metadata/schemas/FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND_20241228_metadata.json
+  • metadata/ddl/FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND_20241228_create.sql
+```
+
+See [Metadata Change Tracking Guide](docs/metadata-change-tracking.md) for details.
+
+## Name Obfuscation (Optional Security Feature)
+
+For enhanced security, you can enable name obfuscation to randomize folder and file names:
+
+```bash
+# Export with obfuscated names
+python scripts/export_data.py --all --obfuscate
+```
+
+**What it does:**
+- Replaces table names with random IDs (e.g., `a7f3d9e2c4b8f1a9`)
+- Replaces file names with random IDs (e.g., `b4c8f1a9.enc`)
+- Creates encrypted master index (`.export_index.enc`)
+- Import automatically detects and handles obfuscated exports
+
+**Benefits:**
+- Casual observers cannot identify table names
+- File listings reveal no information about data structure
+- Adds extra security layer on top of encryption
+
+See [Name Obfuscation Guide](docs/name-obfuscation-guide.md) for details.
 
 ## Next Steps
 
@@ -227,3 +310,17 @@ pip install package-name  # for packages not in conda
 - **Documentation**: sphinx, sphinx-rtd-theme
 - **Data Exploration**: jupyter, matplotlib, seaborn
 - **Database Tools**: pgcli for PostgreSQL CLI
+
+
+
+
+Metadata:
+snowflake export into the current repo in metadata folder including raw schema and ddl
+manual process to accessible in the psql server
+a process to loop through the ddl and create table if not exists
+
+actual data:
+initial load:
+data export from snowflake into a dedicated local file directory
+a manual process to move the files to the psql server
+psql server load the data into psql from a dedicated file directy on the psql server

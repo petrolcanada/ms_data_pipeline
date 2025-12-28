@@ -6,10 +6,13 @@ import json
 import yaml
 import pandas as pd
 from pathlib import Path
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional, Tuple
+from datetime import datetime
 import snowflake.connector
 from pipeline.config.settings import get_settings, get_snowflake_connection_params
 from pipeline.utils.logger import get_logger
+from pipeline.utils.metadata_comparator import MetadataComparator
+from pipeline.utils.change_logger import ChangeLogger
 
 logger = get_logger(__name__)
 
@@ -18,6 +21,10 @@ class SnowflakeMetadataExtractor:
         self.settings = get_settings()
         self.metadata_dir = Path("metadata/schemas")
         self.metadata_dir.mkdir(parents=True, exist_ok=True)
+        self.ddl_dir = Path("metadata/ddl")
+        self.ddl_dir.mkdir(parents=True, exist_ok=True)
+        self.comparator = MetadataComparator()
+        self.change_logger = ChangeLogger()
         
     def connect_to_snowflake(self):
         """
@@ -212,15 +219,103 @@ class SnowflakeMetadataExtractor:
             else:
                 return 'NUMERIC'
     
-    def save_metadata_to_file(self, metadata: Dict[str, Any], table_name: str):
-        """Save metadata to local JSON file in the repository"""
+    def check_metadata_changed(self, table_name: str, new_metadata: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Check if metadata has changed compared to existing file
+        
+        Args:
+            table_name: Name of the table
+            new_metadata: Newly extracted metadata
+            
+        Returns:
+            Comparison result dict if existing metadata found, None if first extraction
+        """
         metadata_file = self.metadata_dir / f"{table_name}_metadata.json"
+        
+        if not metadata_file.exists():
+            logger.info(f"No existing metadata found for {table_name} - this is the first extraction")
+            return None
+        
+        try:
+            with open(metadata_file, 'r') as f:
+                old_metadata = json.load(f)
+            
+            comparison = self.comparator.compare_metadata(old_metadata, new_metadata)
+            
+            if comparison["has_changes"]:
+                logger.warning(f"⚠️  Metadata changes detected for {table_name}")
+                logger.warning(f"   {comparison['summary']}")
+            else:
+                logger.info(f"No metadata changes detected for {table_name}")
+            
+            return comparison
+            
+        except Exception as e:
+            logger.error(f"Error comparing metadata for {table_name}: {e}")
+            return None
+    
+    def archive_old_metadata(self, table_name: str) -> Tuple[Optional[Path], Optional[Path]]:
+        """
+        Archive existing metadata and DDL files with timestamp
+        
+        Args:
+            table_name: Name of the table
+            
+        Returns:
+            Tuple of (archived_metadata_path, archived_ddl_path)
+        """
+        date_str = datetime.now().strftime("%Y%m%d")
+        
+        # Archive metadata file
+        metadata_file = self.metadata_dir / f"{table_name}_metadata.json"
+        archived_metadata = None
+        if metadata_file.exists():
+            archived_metadata = self.metadata_dir / f"{table_name}_{date_str}_metadata.json"
+            metadata_file.rename(archived_metadata)
+            logger.info(f"Archived metadata to {archived_metadata}")
+        
+        # Archive DDL file
+        ddl_file = self.ddl_dir / f"{table_name}_create.sql"
+        archived_ddl = None
+        if ddl_file.exists():
+            archived_ddl = self.ddl_dir / f"{table_name}_{date_str}_create.sql"
+            ddl_file.rename(archived_ddl)
+            logger.info(f"Archived DDL to {archived_ddl}")
+        
+        return archived_metadata, archived_ddl
+    
+    def save_metadata_to_file(self, metadata: Dict[str, Any], table_name: str, check_changes: bool = False) -> Tuple[Path, Optional[Dict[str, Any]]]:
+        """
+        Save metadata to local JSON file in the repository
+        
+        Args:
+            metadata: Metadata to save
+            table_name: Name of the table
+            check_changes: Whether to check for changes before saving
+            
+        Returns:
+            Tuple of (metadata_file_path, comparison_result)
+        """
+        metadata_file = self.metadata_dir / f"{table_name}_metadata.json"
+        comparison = None
+        
+        if check_changes:
+            comparison = self.check_metadata_changed(table_name, metadata)
+            
+            if comparison is None:
+                # First extraction
+                self.change_logger.log_initial_extraction(table_name, metadata)
+            elif comparison["has_changes"]:
+                # Archive old files before saving new ones
+                self.archive_old_metadata(table_name)
+                # Log the changes
+                self.change_logger.log_change(table_name, comparison)
         
         with open(metadata_file, 'w') as f:
             json.dump(metadata, f, indent=2, default=str)
         
         logger.info(f"Saved metadata to {metadata_file}")
-        return metadata_file
+        return metadata_file, comparison
     
     def generate_postgres_ddl(self, metadata: Dict[str, Any], postgres_schema: str, postgres_table: str) -> str:
         """Generate PostgreSQL CREATE TABLE DDL from metadata"""
@@ -251,20 +346,26 @@ class SnowflakeMetadataExtractor:
         
         return "\n".join(ddl_lines)
     
-    def save_postgres_ddl(self, ddl: str, table_name: str):
+    def save_postgres_ddl(self, ddl: str, table_name: str) -> Path:
         """Save PostgreSQL DDL to file"""
-        ddl_dir = Path("metadata/ddl")
-        ddl_dir.mkdir(parents=True, exist_ok=True)
-        
-        ddl_file = ddl_dir / f"{table_name}_create.sql"
+        ddl_file = self.ddl_dir / f"{table_name}_create.sql"
         with open(ddl_file, 'w') as f:
             f.write(ddl)
         
         logger.info(f"Saved DDL to {ddl_file}")
         return ddl_file
     
-    def extract_all_configured_tables(self) -> Dict[str, Any]:
-        """Extract metadata for all tables in config/tables.yaml"""
+    def extract_all_configured_tables(self, check_changes: bool = False, force: bool = False) -> Dict[str, Any]:
+        """
+        Extract metadata for all tables in config/tables.yaml
+        
+        Args:
+            check_changes: Whether to check for metadata changes
+            force: Force re-extraction even if no changes detected
+            
+        Returns:
+            Dictionary with extraction results for each table
+        """
         # Load table configuration
         with open("config/tables.yaml", 'r') as f:
             config = yaml.safe_load(f)
@@ -286,8 +387,18 @@ class SnowflakeMetadataExtractor:
                     sf_config["table"]
                 )
                 
-                # Save metadata to file
-                metadata_file = self.save_metadata_to_file(metadata, table_name)
+                # Save metadata to file (with optional change checking)
+                metadata_file, comparison = self.save_metadata_to_file(
+                    metadata, 
+                    table_name, 
+                    check_changes=check_changes
+                )
+                
+                # Determine if we should skip DDL generation
+                skip_ddl = False
+                if check_changes and comparison and not comparison["has_changes"] and not force:
+                    logger.info(f"Skipping DDL generation for {table_name} (no changes detected)")
+                    skip_ddl = True
                 
                 # Generate PostgreSQL DDL
                 ddl = self.generate_postgres_ddl(
@@ -304,7 +415,10 @@ class SnowflakeMetadataExtractor:
                     "metadata_file": str(metadata_file),
                     "ddl_file": str(ddl_file),
                     "columns": len(metadata["columns"]),
-                    "row_count": metadata["statistics"]["row_count"]
+                    "row_count": metadata["statistics"]["row_count"],
+                    "has_changes": comparison["has_changes"] if comparison else None,
+                    "is_new": comparison is None,
+                    "comparison": comparison
                 }
                 
             except Exception as e:

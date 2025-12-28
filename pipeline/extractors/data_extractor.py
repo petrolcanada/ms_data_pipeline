@@ -4,9 +4,10 @@ Extracts data from Snowflake tables in chunks and saves as compressed Parquet fi
 """
 import pandas as pd
 from pathlib import Path
-from typing import Dict, Any, Generator
+from typing import Dict, Any, Generator, Optional
 import snowflake.connector
-from pipeline.config.settings import get_settings, get_snowflake_connection_params
+from pipeline.config.settings import get_settings
+from pipeline.connections import SnowflakeConnectionManager
 from pipeline.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -15,19 +16,31 @@ logger = get_logger(__name__)
 class SnowflakeDataExtractor:
     """Extract data from Snowflake tables in manageable chunks"""
     
-    def __init__(self):
-        self.settings = get_settings()
+    def __init__(self, connection_manager: Optional[SnowflakeConnectionManager] = None):
+        """
+        Initialize data extractor
         
-    def connect_to_snowflake(self):
-        """Establish connection to Snowflake"""
-        try:
-            conn_params = get_snowflake_connection_params()
-            conn = snowflake.connector.connect(**conn_params)
-            logger.info(f"Connected to Snowflake: {self.settings.snowflake_account}")
-            return conn
-        except Exception as e:
-            logger.error(f"Failed to connect to Snowflake: {e}")
-            raise
+        Args:
+            connection_manager: Optional SnowflakeConnectionManager instance.
+                              If not provided, creates a new one (not recommended for multiple operations)
+        """
+        self.settings = get_settings()
+        self._conn_manager = connection_manager
+        self._owns_connection = connection_manager is None
+        
+        # Create connection manager if not provided
+        if self._conn_manager is None:
+            logger.warning("No connection manager provided - creating new one. Consider passing a connection manager for better performance.")
+            self._conn_manager = SnowflakeConnectionManager()
+    
+    def get_connection(self):
+        """Get Snowflake connection from manager"""
+        return self._conn_manager.get_connection()
+    
+    def close(self):
+        """Close connection if we own it"""
+        if self._owns_connection and self._conn_manager is not None:
+            self._conn_manager.close()
     
     def _build_filter_clause(self, filter_config) -> str:
         """
@@ -101,7 +114,7 @@ class SnowflakeDataExtractor:
         Returns:
             Dictionary with row_count, size_bytes, size_mb
         """
-        conn = self.connect_to_snowflake()
+        conn = self.get_connection()
         cursor = conn.cursor()
         
         try:
@@ -182,7 +195,6 @@ class SnowflakeDataExtractor:
                 
         finally:
             cursor.close()
-            conn.close()
     
     def extract_table_chunks(
         self, 
@@ -207,7 +219,7 @@ class SnowflakeDataExtractor:
         Yields:
             DataFrame chunks
         """
-        conn = self.connect_to_snowflake()
+        conn = self.get_connection()
         cursor = conn.cursor()
         
         try:
@@ -262,7 +274,6 @@ class SnowflakeDataExtractor:
             raise
         finally:
             cursor.close()
-            conn.close()
     
     def save_chunk_to_parquet(
         self, 
