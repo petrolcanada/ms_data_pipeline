@@ -52,6 +52,29 @@ tables:
     # import:
     #   batch_size: 5000          # Smaller batches for this table
 
+  - name: "MONTH_END_TRAILING_TOTAL_RETURNS_CA_OPENEND"
+    snowflake:
+      database: "CIGAM_PRD_RL"
+      schema: "MORNINGSTAR_MAIN"
+      table: "MONTH_END_TRAILING_TOTAL_RETURNS_CA_OPENEND"
+      # Filter with QUALIFY clause for deduplication
+      # Gets latest record per _ID and MONTHENDDATE combination
+      filter:
+        - "WHERE _ID IN (SELECT mstarid FROM CIGAM_SBX_PL.DNA_ANALYTICS_INSIGHTS_INVESTMENT_PRODUCT.V_MSTAR_PEERS_FCLASS_ETF_ID_CA_OPENEND)"
+        - "QUALIFY ROW_NUMBER() OVER (PARTITION BY _ID, MONTHENDDATE ORDER BY _TIMESTAMPTO DESC) = 1"
+    postgres:
+      schema: "ms"
+      table: "MONTH_END_TRAILING_TOTAL_RETURNS_CA_OPENEND"
+    sync_mode: "full"
+    schedule: "daily"
+    encryption: true
+    compression: true
+    # Optional: Customize for this specific table
+    # export:
+    #   chunk_size: 50000         # Smaller chunks for this table
+    # import:
+    #   batch_size: 5000          # Smaller batches for this table
+
 
 
 # SELECT *
@@ -59,5 +82,3 @@ tables:
 # WHERE 1=1
 # AND _ID IN (select mstarid from CIGAM_SBX_PL.DNA_ANALYTICS_INSIGHTS_INVESTMENT_PRODUCT.V_MSTAR_PEERS_FCLASS_ETF_ID_CA_OPENEND)
 # QUALIFY ROW_NUMBER() OVER (PARTITION BY _ID, MONTHENDDATE ORDER BY _TIMESTAMPTO DESC) = 1
-# ORDER BY MONTHENDDATE DESC
-# LIMIT 1000;
