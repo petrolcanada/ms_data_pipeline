@@ -152,7 +152,8 @@ class SnowflakeDataExtractor:
                 {filter_clause}
                 """
                 
-                logger.info(f"Counting filtered rows with query: {count_query}")
+                logger.info(f"Estimating filtered table size...")
+                logger.info(f"  Count query: {count_query.strip()}")
                 cursor.execute(count_query)
                 row_count = cursor.fetchone()[0] or 0
                 
@@ -260,11 +261,12 @@ class SnowflakeDataExtractor:
             if order_by:
                 query += f" ORDER BY {order_by}"
             
+            # Log query BEFORE execution
             logger.info(f"Extracting data from {database}.{schema}.{table}")
             if filter_clause:
                 logger.info(f"  Filter: {filter_clause}")
             logger.info(f"  Chunk size: {chunk_size:,} rows")
-            logger.info(f"  Query: {query}")
+            logger.info(f"  Full query: {query}")
             
             # Execute query
             cursor.execute(query)
