@@ -364,8 +364,8 @@ def main():
         if use_obfuscation:
             obfuscator = DataObfuscator()
             print("\n🔒 Name obfuscation: ENABLED")
-            print("   Folder and file names will be randomized")
-            print("   Master index will be created: .export_index.enc")
+            print("   Folder and file names will use deterministic IDs")
+            print("   Same table = same folder ID across runs")
         else:
             print("\n📁 Name obfuscation: DISABLED")
             print("   Using original table names for folders")
@@ -374,9 +374,6 @@ def main():
         print("\n🔐 Connecting to Snowflake...")
         with SnowflakeConnectionManager() as conn_manager:
             print("✅ Connected to Snowflake (SSO authentication complete)")
-            
-            # Track table mappings for master index
-            table_mappings = []
             
             # Export tables
             if args.table:
@@ -398,17 +395,6 @@ def main():
                     obfuscator=obfuscator,
                     chunk_size=args.chunk_size
                 )
-                
-                # Add to table mappings if obfuscated
-                if use_obfuscation:
-                    table_mappings.append({
-                        "table_name": export_result["table_name"],
-                        "folder_id": export_result["folder_id"],
-                        "manifest_file_id": export_result["manifest_file_id"],
-                        "export_timestamp": export_result["export_timestamp"],
-                        "total_rows": export_result["total_rows"],
-                        "total_chunks": export_result["total_chunks"]
-                    })
             else:
                 # Export all tables
                 print(f"\n{'=' * 70}")
@@ -425,45 +411,12 @@ def main():
                             obfuscator=obfuscator,
                             chunk_size=args.chunk_size
                         )
-                        
-                        # Add to table mappings if obfuscated
-                        if use_obfuscation:
-                            table_mappings.append({
-                                "table_name": export_result["table_name"],
-                                "folder_id": export_result["folder_id"],
-                                "manifest_file_id": export_result["manifest_file_id"],
-                                "export_timestamp": export_result["export_timestamp"],
-                                "total_rows": export_result["total_rows"],
-                                "total_chunks": export_result["total_chunks"]
-                            })
                     except Exception as e:
                         logger.error(f"Failed to export {table_config['name']}: {e}")
                         print(f"\n❌ Failed to export {table_config['name']}: {e}")
                 
                 print(f"\n{'=' * 70}")
                 print("ALL EXPORTS COMPLETE")
-                print(f"{'=' * 70}")
-            
-            # Create master index if obfuscation is enabled
-            if use_obfuscation and table_mappings:
-                print(f"\n{'=' * 70}")
-                print("CREATING MASTER INDEX")
-                print(f"{'=' * 70}")
-                
-                master_index_path = Path(export_base_dir) / "index.enc"
-                index_info = obfuscator.create_master_index(
-                    table_mappings,
-                    master_index_path,
-                    password
-                )
-                
-                print(f"✅ Master index created: {master_index_path}")
-                print(f"   Tables: {index_info['table_count']}")
-                print(f"   Size: {index_info['size_bytes'] / 1024:.2f} KB")
-                print(f"   Checksum: {index_info['checksum_sha256'][:16]}...")
-                print(f"\n⚠️  Keep this file with your exports!")
-                print(f"   It maps obfuscated folder names to table names")
-                print(f"   It also contains manifest file IDs for each table")
                 print(f"{'=' * 70}")
         
         # Connection automatically closed when exiting context manager
@@ -472,7 +425,7 @@ def main():
         print("\n📋 Next steps:")
         print(f"1. Copy {export_base_dir}/ folder to PostgreSQL server")
         if use_obfuscation:
-            print(f"   (includes index.enc - required for import!)")
+            print(f"   (Obfuscated folders use deterministic IDs - no index file needed)")
         print(f"2. Run: python scripts/import_data.py --table {args.table or '<table_name>'}")
         
     except KeyboardInterrupt:

@@ -456,7 +456,6 @@ class SnowflakeMetadataExtractor:
             config = yaml.safe_load(f)
         
         results = {}
-        table_mappings = []  # For master index if obfuscation enabled
         
         # Create single Snowflake connection for all tables
         logger.info("Establishing Snowflake connection for all tables...")
@@ -503,19 +502,6 @@ class SnowflakeMetadataExtractor:
                     # Save DDL to file
                     ddl_file = self.save_postgres_ddl(ddl, table_name, password=password)
                     
-                    # If obfuscation enabled, track file mappings
-                    if self.obfuscator:
-                        # Extract file IDs from paths
-                        metadata_file_id = metadata_file.stem  # Remove .enc extension
-                        ddl_file_id = ddl_file.stem  # Remove .enc extension
-                        
-                        table_mappings.append({
-                            "table_name": table_name,
-                            "metadata_file_id": metadata_file_id,
-                            "ddl_file_id": ddl_file_id,
-                            "extracted_at": metadata["extracted_at"]
-                        })
-                    
                     results[table_name] = {
                         "status": "success",
                         "metadata_file": str(metadata_file),
@@ -537,24 +523,6 @@ class SnowflakeMetadataExtractor:
             # Close the shared connection
             logger.info("Closing Snowflake connection")
             conn.close()
-        
-        # Create master index if obfuscation enabled
-        if self.obfuscator and table_mappings:
-            if not password:
-                raise ValueError("Password required for obfuscated metadata master index")
-            
-            try:
-                index_path = Path("metadata") / "index.enc"
-                index_info = self.obfuscator.create_metadata_master_index(
-                    table_mappings,
-                    index_path,
-                    password
-                )
-                logger.info(f"Created metadata master index: {index_path}")
-                logger.info(f"  Tables indexed: {index_info['table_count']}")
-            except Exception as e:
-                logger.error(f"Failed to create metadata master index: {e}")
-                # Don't fail the entire extraction if index creation fails
         
         return results
 

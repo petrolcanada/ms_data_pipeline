@@ -46,11 +46,15 @@ class SnowflakeDataExtractor:
         """
         Build SQL filter clause from configuration
         
+        Handles WHERE conditions and QUALIFY clauses correctly.
+        QUALIFY is a Snowflake-specific clause that must come after WHERE,
+        not be joined with AND.
+        
         Args:
             filter_config: String or list of filter conditions
             
         Returns:
-            Complete WHERE clause or empty string
+            Complete WHERE/QUALIFY clause or empty string
         """
         if not filter_config:
             return ""
@@ -60,8 +64,8 @@ class SnowflakeDataExtractor:
             filter_str = filter_config.strip()
             if not filter_str:
                 return ""
-            # If it already starts with WHERE, use as-is
-            if filter_str.upper().startswith("WHERE"):
+            # If it already starts with WHERE or QUALIFY, use as-is
+            if filter_str.upper().startswith(("WHERE", "QUALIFY")):
                 return filter_str
             # Otherwise, prepend WHERE
             return f"WHERE {filter_str}"
@@ -74,21 +78,43 @@ class SnowflakeDataExtractor:
             if not filters:
                 return ""
             
-            # Process first filter
-            first_filter = filters[0]
-            if first_filter.upper().startswith("WHERE"):
-                result = first_filter
-            else:
-                result = f"WHERE {first_filter}"
+            # Separate WHERE conditions from QUALIFY clauses
+            where_conditions = []
+            qualify_clauses = []
             
-            # Process remaining filters
-            for filter_item in filters[1:]:
-                # If it starts with AND/OR, use as-is
-                if filter_item.upper().startswith(("AND", "OR")):
-                    result += f" {filter_item}"
+            for filter_item in filters:
+                filter_upper = filter_item.upper()
+                if filter_upper.startswith("QUALIFY"):
+                    # This is a QUALIFY clause
+                    qualify_clauses.append(filter_item)
                 else:
-                    # Otherwise, prepend AND
-                    result += f" AND {filter_item}"
+                    # This is a WHERE condition
+                    where_conditions.append(filter_item)
+            
+            # Build WHERE clause
+            result = ""
+            if where_conditions:
+                first_condition = where_conditions[0]
+                if first_condition.upper().startswith("WHERE"):
+                    result = first_condition
+                else:
+                    result = f"WHERE {first_condition}"
+                
+                # Add remaining WHERE conditions
+                for condition in where_conditions[1:]:
+                    # If it starts with AND/OR, use as-is
+                    if condition.upper().startswith(("AND", "OR")):
+                        result += f" {condition}"
+                    else:
+                        # Otherwise, prepend AND
+                        result += f" AND {condition}"
+            
+            # Add QUALIFY clauses (they come after WHERE, not joined with AND)
+            for qualify_clause in qualify_clauses:
+                if result:
+                    result += f" {qualify_clause}"
+                else:
+                    result = qualify_clause
             
             return result
         

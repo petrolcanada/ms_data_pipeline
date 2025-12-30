@@ -115,12 +115,13 @@ metadata/
 - Password can be stored in `.env` for convenience
 - Change tracking no longer creates separate log files
 - Versioned files use timestamp format: `{table}_{YYYYMMDD}`
-- Master index for metadata is separate from data master index
 - **File IDs are now deterministic** - same table always gets same file ID across runs
 - File IDs are based on SHA-256 hash of table name + context (e.g., "metadata", "ddl", "folder")
 - This prevents orphaned files and ensures idempotent operations
 - **Single Snowflake connection** is used for all tables in batch operations (critical for SSO)
 - Data export already uses single connection pattern via `SnowflakeConnectionManager`
+- **No master index file (index.enc) needed** - file IDs are computed directly from table names
+- Simpler file structure, no index file to manage or lose
 
 ## Next Action
 

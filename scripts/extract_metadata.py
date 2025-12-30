@@ -191,9 +191,9 @@ def main():
         if obfuscate:
             print("=" * 50)
             print("Obfuscation Summary:")
-            print(f"  • Metadata files encrypted with random names")
-            print(f"  • DDL files encrypted with random names")
-            print(f"  • Master index created: metadata/index.enc")
+            print(f"  • Metadata files encrypted with deterministic names")
+            print(f"  • DDL files encrypted with deterministic names")
+            print(f"  • File IDs are consistent across runs (same table = same ID)")
             print(f"  • Use same password to decrypt files")
             print()
         
