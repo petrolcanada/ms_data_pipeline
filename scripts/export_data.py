@@ -142,6 +142,17 @@ def export_table(
     else:
         print(f"✅ Table size: {size_info['row_count']:,} rows ({size_info['size_mb']:.2f} MB)")
     
+    # Display the full query that will be executed
+    print(f"\n📋 SQL Query:")
+    print("=" * 70)
+    base_query = f"SELECT * FROM {sf_config['database']}.{sf_config['schema']}.{sf_config['table']}"
+    if filter_clause:
+        full_query = f"{base_query} {filter_clause}"
+    else:
+        full_query = base_query
+    print(full_query)
+    print("=" * 70)
+    
     # Extract and process chunks (reuses connection)
     print(f"\n🔄 Extracting data in chunks of {chunk_size:,} rows...")
     
