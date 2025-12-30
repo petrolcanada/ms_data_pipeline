@@ -26,8 +26,13 @@ import yaml
 logger = get_logger(__name__)
 
 
-def get_password(password_file: str = None) -> str:
-    """Get decryption password from file or prompt"""
+def get_password(password_file: str = None, from_env: str = None) -> str:
+    """
+    Get decryption password from environment, file, or prompt
+    
+    Priority: password_file > from_env > prompt
+    """
+    # Try password file first
     if password_file:
         password_path = Path(password_file).expanduser()
         if password_path.exists():
@@ -37,6 +42,11 @@ def get_password(password_file: str = None) -> str:
             return password
         else:
             logger.warning(f"Password file not found: {password_file}")
+    
+    # Try environment variable
+    if from_env:
+        logger.info("Using decryption password from .env")
+        return from_env
     
     # Prompt for password
     password = getpass.getpass("Enter decryption password: ")
@@ -224,8 +234,9 @@ def main():
         settings = get_settings()
         import_base_dir = getattr(settings, 'import_base_dir', 'imports')
         
-        # Get password
-        password = get_password(args.password_file)
+        # Get password (priority: --password-file > ENCRYPTION_PASSWORD env > prompt)
+        env_password = getattr(settings, 'encryption_password', None)
+        password = get_password(args.password_file, from_env=env_password)
         
         # Load table configuration
         with open("config/tables.yaml", 'r') as f:

@@ -30,8 +30,13 @@ import yaml
 logger = get_logger(__name__)
 
 
-def get_password(password_file: str = None) -> str:
-    """Get encryption password from file or prompt"""
+def get_password(password_file: str = None, from_env: str = None) -> str:
+    """
+    Get encryption password from environment, file, or prompt
+    
+    Priority: password_file > from_env > prompt
+    """
+    # Try password file first
     if password_file:
         password_path = Path(password_file).expanduser()
         if password_path.exists():
@@ -41,6 +46,11 @@ def get_password(password_file: str = None) -> str:
             return password
         else:
             logger.warning(f"Password file not found: {password_file}")
+    
+    # Try environment variable
+    if from_env:
+        logger.info("Using encryption password from .env")
+        return from_env
     
     # Prompt for password
     password = getpass.getpass("Enter encryption password: ")
@@ -318,14 +328,9 @@ def main():
         help="Rows per chunk (default: 100000)"
     )
     parser.add_argument(
-        "--obfuscate",
-        action="store_true",
-        help="Enable name obfuscation for folders and files"
-    )
-    parser.add_argument(
         "--no-obfuscate",
         action="store_true",
-        help="Disable name obfuscation (use original names)"
+        help="Disable name obfuscation (obfuscation is enabled by default)"
     )
     
     args = parser.parse_args()
@@ -334,26 +339,21 @@ def main():
         print("Error: Must specify either --table <name> or --all")
         sys.exit(1)
     
-    if args.obfuscate and args.no_obfuscate:
-        print("Error: Cannot specify both --obfuscate and --no-obfuscate")
-        sys.exit(1)
-    
     try:
         # Get settings
         settings = get_settings()
         export_base_dir = getattr(settings, 'export_base_dir', 'exports')
         
         # Determine if obfuscation should be enabled
-        # Priority: command line args > settings > default (False)
-        if args.obfuscate:
-            use_obfuscation = True
-        elif args.no_obfuscate:
+        # Priority: --no-obfuscate flag > OBFUSCATE_NAMES env > default (True)
+        if args.no_obfuscate:
             use_obfuscation = False
         else:
-            use_obfuscation = getattr(settings, 'obfuscate_names', False)
+            use_obfuscation = getattr(settings, 'obfuscate_names', True)
         
-        # Get password
-        password = get_password(args.password_file)
+        # Get password (priority: --password-file > ENCRYPTION_PASSWORD env > prompt)
+        env_password = getattr(settings, 'encryption_password', None)
+        password = get_password(args.password_file, from_env=env_password)
         
         # Load table configuration
         with open("config/tables.yaml", 'r') as f:

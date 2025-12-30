@@ -231,3 +231,114 @@ class DataObfuscator:
         """Reset used identifiers (for new export session)"""
         self._used_identifiers.clear()
         logger.debug("Obfuscator reset - cleared used identifiers")
+
+
+
+class MetadataObfuscator(DataObfuscator):
+    """
+    Obfuscator specifically for metadata files (JSON and DDL)
+    
+    Extends DataObfuscator with metadata-specific functionality
+    """
+    
+    def generate_metadata_file_id(self, table_name: str, file_type: str) -> str:
+        """
+        Generate obfuscated file identifier for metadata
+        
+        Args:
+            table_name: Original table name (for logging)
+            file_type: Type of file ('metadata' or 'ddl')
+            
+        Returns:
+            Random file identifier
+        """
+        file_id = self.generate_identifier()
+        logger.info(f"Generated {file_type} file ID for table '{table_name}': {file_id}")
+        return file_id
+    
+    def create_metadata_master_index(
+        self,
+        table_mappings: List[Dict],
+        output_path: Path,
+        password: str
+    ) -> Dict:
+        """
+        Create and encrypt master index for metadata files
+        
+        Args:
+            table_mappings: List of table mapping dictionaries
+                          Each should contain: table_name, metadata_file_id, ddl_file_id
+            output_path: Path to save encrypted index (metadata/index.enc)
+            password: Encryption password
+            
+        Returns:
+            Master index metadata
+        """
+        try:
+            # Create master index structure
+            master_index = {
+                "version": "1.0",
+                "created_at": datetime.utcnow().isoformat() + "Z",
+                "obfuscation_enabled": True,
+                "type": "metadata",
+                "tables": table_mappings
+            }
+            
+            logger.info(f"Creating metadata master index with {len(table_mappings)} table(s)")
+            
+            # Save as temporary JSON file
+            temp_json = output_path.parent / "metadata_index.json.tmp"
+            with open(temp_json, 'w') as f:
+                json.dump(master_index, f, indent=2)
+            
+            # Encrypt the index file
+            logger.info("Encrypting metadata master index...")
+            encryption_info = self.encryptor.encrypt_file(
+                temp_json,
+                output_path,
+                password
+            )
+            
+            # Remove temporary file
+            temp_json.unlink()
+            
+            logger.info(f"Metadata master index created and encrypted: {output_path}")
+            logger.info(f"  Size: {encryption_info['encrypted_size'] / 1024:.2f} KB")
+            
+            return {
+                "file": output_path.name,
+                "size_bytes": encryption_info['encrypted_size'],
+                "checksum_sha256": encryption_info['checksum_sha256'],
+                "table_count": len(table_mappings)
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to create metadata master index: {e}")
+            raise
+    
+    def find_metadata_files(
+        self,
+        master_index: Dict,
+        table_name: str
+    ) -> Optional[Dict]:
+        """
+        Find obfuscated file IDs for a table's metadata
+        
+        Args:
+            master_index: Decrypted master index
+            table_name: Table name to find
+            
+        Returns:
+            Dictionary with metadata_file_id and ddl_file_id, or None if not found
+        """
+        for table_entry in master_index.get('tables', []):
+            if table_entry.get('table_name') == table_name:
+                result = {
+                    'metadata_file_id': table_entry.get('metadata_file_id'),
+                    'ddl_file_id': table_entry.get('ddl_file_id')
+                }
+                logger.debug(f"Found metadata files for '{table_name}': {result}")
+                return result
+        
+        logger.warning(f"Table '{table_name}' not found in metadata master index")
+        return None
