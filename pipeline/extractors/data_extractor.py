@@ -146,10 +146,15 @@ class SnowflakeDataExtractor:
         try:
             # If filter is provided, count filtered rows
             if filter_clause:
+                # Wrap the filtered query in a subquery to count results
+                # This is necessary because COUNT(*) doesn't work directly with QUALIFY
                 count_query = f"""
                 SELECT COUNT(*) 
-                FROM {database}.{schema}.{table}
-                {filter_clause}
+                FROM (
+                    SELECT * 
+                    FROM {database}.{schema}.{table}
+                    {filter_clause}
+                ) AS filtered_data
                 """
                 
                 # Log and print query BEFORE execution
