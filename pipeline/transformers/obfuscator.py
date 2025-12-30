@@ -56,17 +56,45 @@ class DataObfuscator:
         
         raise RuntimeError(f"Failed to generate unique identifier after {max_attempts} attempts")
     
+    def generate_deterministic_identifier(self, key: str, context: str = "") -> str:
+        """
+        Generate a deterministic identifier based on a key
+        
+        This ensures the same key always produces the same identifier,
+        which is useful for table-level files that should have consistent
+        names across multiple runs.
+        
+        Args:
+            key: The key to generate identifier from (e.g., table name)
+            context: Optional context to include in hash (e.g., "metadata", "ddl", "folder")
+            
+        Returns:
+            Hexadecimal string identifier (deterministic)
+        """
+        import hashlib
+        
+        # Create deterministic ID from key + context
+        data = f"{key}:{context}".encode('utf-8')
+        hash_obj = hashlib.sha256(data)
+        identifier = hash_obj.hexdigest()[:self.identifier_length]
+        
+        logger.debug(f"Generated deterministic identifier for '{key}' (context: '{context}'): {identifier}")
+        return identifier
+    
     def generate_folder_id(self, table_name: str) -> str:
         """
-        Generate obfuscated folder identifier for a table
+        Generate deterministic obfuscated folder identifier for a table
+        
+        Uses deterministic generation so the same table always gets
+        the same folder ID across multiple runs.
         
         Args:
             table_name: Original table name
             
         Returns:
-            Random folder identifier
+            Deterministic folder identifier
         """
-        folder_id = self.generate_identifier()
+        folder_id = self.generate_deterministic_identifier(table_name, "folder")
         logger.info(f"Generated folder ID for table '{table_name}': {folder_id}")
         return folder_id
     
@@ -86,15 +114,18 @@ class DataObfuscator:
     
     def generate_manifest_id(self, table_name: str) -> str:
         """
-        Generate obfuscated manifest file identifier for a table
+        Generate deterministic obfuscated manifest file identifier for a table
+        
+        Uses deterministic generation so the same table always gets
+        the same manifest ID across multiple runs.
         
         Args:
-            table_name: Original table name (for logging only)
+            table_name: Original table name
             
         Returns:
-            Random manifest file identifier
+            Deterministic manifest file identifier
         """
-        manifest_id = self.generate_identifier()
+        manifest_id = self.generate_deterministic_identifier(table_name, "manifest")
         logger.info(f"Generated manifest ID for table '{table_name}': {manifest_id}")
         return manifest_id
     
@@ -243,16 +274,19 @@ class MetadataObfuscator(DataObfuscator):
     
     def generate_metadata_file_id(self, table_name: str, file_type: str) -> str:
         """
-        Generate obfuscated file identifier for metadata
+        Generate deterministic obfuscated file identifier for metadata
+        
+        Uses deterministic generation so the same table always gets
+        the same file ID across multiple runs.
         
         Args:
-            table_name: Original table name (for logging)
+            table_name: Original table name
             file_type: Type of file ('metadata' or 'ddl')
             
         Returns:
-            Random file identifier
+            Deterministic file identifier
         """
-        file_id = self.generate_identifier()
+        file_id = self.generate_deterministic_identifier(table_name, file_type)
         logger.info(f"Generated {file_type} file ID for table '{table_name}': {file_id}")
         return file_id
     

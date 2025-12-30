@@ -67,9 +67,25 @@ class SnowflakeMetadataExtractor:
                 logger.info("SSO authentication requires a browser. Ensure you're running in an environment with browser access.")
             raise
     
-    def extract_table_metadata(self, database: str, schema: str, table: str) -> Dict[str, Any]:
-        """Extract complete metadata for a specific table"""
-        conn = self.connect_to_snowflake()
+    def extract_table_metadata(self, database: str, schema: str, table: str, conn=None) -> Dict[str, Any]:
+        """
+        Extract complete metadata for a specific table
+        
+        Args:
+            database: Snowflake database name
+            schema: Snowflake schema name
+            table: Snowflake table name
+            conn: Optional existing Snowflake connection (if None, creates new connection)
+            
+        Returns:
+            Dictionary with table metadata
+        """
+        # Use provided connection or create new one
+        should_close = False
+        if conn is None:
+            conn = self.connect_to_snowflake()
+            should_close = True
+        
         cursor = conn.cursor()
         
         try:
@@ -161,7 +177,9 @@ class SnowflakeMetadataExtractor:
             raise
         finally:
             cursor.close()
-            conn.close()
+            # Only close connection if we created it
+            if should_close:
+                conn.close()
     
     def _map_to_postgres_type(self, snowflake_type: str, max_length: int, precision: int, scale: int) -> str:
         """Map Snowflake data types to PostgreSQL equivalents"""
@@ -440,75 +458,85 @@ class SnowflakeMetadataExtractor:
         results = {}
         table_mappings = []  # For master index if obfuscation enabled
         
-        for table_config in config["tables"]:
-            table_name = table_config["name"]
-            sf_config = table_config["snowflake"]
-            pg_config = table_config["postgres"]
-            
-            try:
-                logger.info(f"Processing table: {table_name}")
+        # Create single Snowflake connection for all tables
+        logger.info("Establishing Snowflake connection for all tables...")
+        conn = self.connect_to_snowflake()
+        
+        try:
+            for table_config in config["tables"]:
+                table_name = table_config["name"]
+                sf_config = table_config["snowflake"]
+                pg_config = table_config["postgres"]
                 
-                # Extract metadata from Snowflake
-                metadata = self.extract_table_metadata(
-                    sf_config["database"],
-                    sf_config["schema"],
-                    sf_config["table"]
-                )
-                
-                # Save metadata to file (with optional change checking)
-                metadata_file, comparison = self.save_metadata_to_file(
-                    metadata, 
-                    table_name, 
-                    check_changes=check_changes,
-                    password=password
-                )
-                
-                # Determine if we should skip DDL generation
-                skip_ddl = False
-                if check_changes and comparison and not comparison["has_changes"] and not force:
-                    logger.info(f"Skipping DDL generation for {table_name} (no changes detected)")
-                    skip_ddl = True
-                
-                # Generate PostgreSQL DDL
-                ddl = self.generate_postgres_ddl(
-                    metadata,
-                    pg_config["schema"],
-                    pg_config["table"]
-                )
-                
-                # Save DDL to file
-                ddl_file = self.save_postgres_ddl(ddl, table_name, password=password)
-                
-                # If obfuscation enabled, track file mappings
-                if self.obfuscator:
-                    # Extract file IDs from paths
-                    metadata_file_id = metadata_file.stem  # Remove .enc extension
-                    ddl_file_id = ddl_file.stem  # Remove .enc extension
+                try:
+                    logger.info(f"Processing table: {table_name}")
                     
-                    table_mappings.append({
-                        "table_name": table_name,
-                        "metadata_file_id": metadata_file_id,
-                        "ddl_file_id": ddl_file_id,
-                        "extracted_at": metadata["extracted_at"]
-                    })
-                
-                results[table_name] = {
-                    "status": "success",
-                    "metadata_file": str(metadata_file),
-                    "ddl_file": str(ddl_file),
-                    "columns": len(metadata["columns"]),
-                    "row_count": metadata["statistics"]["row_count"],
-                    "has_changes": comparison["has_changes"] if comparison else None,
-                    "is_new": comparison is None,
-                    "comparison": comparison
-                }
-                
-            except Exception as e:
-                logger.error(f"Failed to process table {table_name}: {e}")
-                results[table_name] = {
-                    "status": "error",
-                    "error": str(e)
-                }
+                    # Extract metadata from Snowflake (reuse connection)
+                    metadata = self.extract_table_metadata(
+                        sf_config["database"],
+                        sf_config["schema"],
+                        sf_config["table"],
+                        conn=conn  # Pass existing connection
+                    )
+                    
+                    # Save metadata to file (with optional change checking)
+                    metadata_file, comparison = self.save_metadata_to_file(
+                        metadata, 
+                        table_name, 
+                        check_changes=check_changes,
+                        password=password
+                    )
+                    
+                    # Determine if we should skip DDL generation
+                    skip_ddl = False
+                    if check_changes and comparison and not comparison["has_changes"] and not force:
+                        logger.info(f"Skipping DDL generation for {table_name} (no changes detected)")
+                        skip_ddl = True
+                    
+                    # Generate PostgreSQL DDL
+                    ddl = self.generate_postgres_ddl(
+                        metadata,
+                        pg_config["schema"],
+                        pg_config["table"]
+                    )
+                    
+                    # Save DDL to file
+                    ddl_file = self.save_postgres_ddl(ddl, table_name, password=password)
+                    
+                    # If obfuscation enabled, track file mappings
+                    if self.obfuscator:
+                        # Extract file IDs from paths
+                        metadata_file_id = metadata_file.stem  # Remove .enc extension
+                        ddl_file_id = ddl_file.stem  # Remove .enc extension
+                        
+                        table_mappings.append({
+                            "table_name": table_name,
+                            "metadata_file_id": metadata_file_id,
+                            "ddl_file_id": ddl_file_id,
+                            "extracted_at": metadata["extracted_at"]
+                        })
+                    
+                    results[table_name] = {
+                        "status": "success",
+                        "metadata_file": str(metadata_file),
+                        "ddl_file": str(ddl_file),
+                        "columns": len(metadata["columns"]),
+                        "row_count": metadata["statistics"]["row_count"],
+                        "has_changes": comparison["has_changes"] if comparison else None,
+                        "is_new": comparison is None,
+                        "comparison": comparison
+                    }
+                    
+                except Exception as e:
+                    logger.error(f"Failed to process table {table_name}: {e}")
+                    results[table_name] = {
+                        "status": "error",
+                        "error": str(e)
+                    }
+        finally:
+            # Close the shared connection
+            logger.info("Closing Snowflake connection")
+            conn.close()
         
         # Create master index if obfuscation enabled
         if self.obfuscator and table_mappings:

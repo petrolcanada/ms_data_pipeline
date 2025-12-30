@@ -34,6 +34,7 @@
 - ✅ Added `generate_metadata_file_id()` method
 - ✅ Added `create_metadata_master_index()` method
 - ✅ Added `find_metadata_files()` method
+- ✅ **Updated to use deterministic file IDs** (same table = same file ID across runs)
 
 ### 5. Requirements Documentation
 - ✅ Created comprehensive requirements document
@@ -50,6 +51,7 @@
   - Create metadata master index if obfuscation enabled
   - Encrypt metadata JSON files
   - Encrypt DDL SQL files
+  - **Use single Snowflake connection for all tables** (critical for SSO)
 
 ### 2. Extract Metadata Script Updates
 - ✅ Add `--no-obfuscate` flag to `extract_metadata.py`
@@ -114,6 +116,11 @@ metadata/
 - Change tracking no longer creates separate log files
 - Versioned files use timestamp format: `{table}_{YYYYMMDD}`
 - Master index for metadata is separate from data master index
+- **File IDs are now deterministic** - same table always gets same file ID across runs
+- File IDs are based on SHA-256 hash of table name + context (e.g., "metadata", "ddl", "folder")
+- This prevents orphaned files and ensures idempotent operations
+- **Single Snowflake connection** is used for all tables in batch operations (critical for SSO)
+- Data export already uses single connection pattern via `SnowflakeConnectionManager`
 
 ## Next Action
 
