@@ -42,21 +42,21 @@
 ## 🔨 In Progress / TODO
 
 ### 1. Metadata Extractor Updates
-- ⏳ Update `SnowflakeMetadataExtractor.__init__()` to accept obfuscator parameter
-- ⏳ Update `save_metadata_to_file()` to support obfuscation
-- ⏳ Update `save_postgres_ddl()` to support obfuscation
-- ⏳ Update `extract_all_configured_tables()` to:
+- ✅ Update `SnowflakeMetadataExtractor.__init__()` to accept obfuscator parameter
+- ✅ Update `save_metadata_to_file()` to support obfuscation
+- ✅ Update `save_postgres_ddl()` to support obfuscation
+- ✅ Update `extract_all_configured_tables()` to:
   - Accept obfuscation parameter
   - Create metadata master index if obfuscation enabled
   - Encrypt metadata JSON files
   - Encrypt DDL SQL files
 
 ### 2. Extract Metadata Script Updates
-- ⏳ Add `--no-obfuscate` flag to `extract_metadata.py`
-- ⏳ Add password handling (from env or prompt)
-- ⏳ Initialize `MetadataObfuscator` if obfuscation enabled
-- ⏳ Pass obfuscator to metadata extractor
-- ⏳ Display obfuscation status in output
+- ✅ Add `--no-obfuscate` flag to `extract_metadata.py`
+- ✅ Add password handling (from env or prompt)
+- ✅ Initialize `MetadataObfuscator` if obfuscation enabled
+- ✅ Pass obfuscator to metadata extractor
+- ✅ Display obfuscation status in output
 
 ### 3. Documentation Updates
 - ⏳ Update `docs/metadata-change-tracking.md` to reflect console-only logging
@@ -75,20 +75,20 @@
 
 ## Implementation Plan
 
-### Phase 1: Core Metadata Obfuscation (Next Steps)
-1. Update `SnowflakeMetadataExtractor` class
-2. Update `extract_metadata.py` script
-3. Test basic obfuscation functionality
+### Phase 1: Core Metadata Obfuscation ✅ COMPLETE
+1. ✅ Update `SnowflakeMetadataExtractor` class
+2. ✅ Update `extract_metadata.py` script
+3. ⏳ Test basic obfuscation functionality
 
 ### Phase 2: Integration
-1. Test with change detection
-2. Test with PostgreSQL table creation
-3. Verify backward compatibility
+1. ⏳ Test with change detection
+2. ⏳ Test with PostgreSQL table creation
+3. ⏳ Verify backward compatibility
 
 ### Phase 3: Documentation
-1. Update all documentation
-2. Create examples
-3. Update command reference
+1. ⏳ Update all documentation
+2. ⏳ Create examples
+3. ⏳ Update command reference
 
 ## File Structure After Implementation
 
@@ -117,4 +117,19 @@ metadata/
 
 ## Next Action
 
-Continue with Phase 1: Update `SnowflakeMetadataExtractor` to support obfuscation.
+Phase 1 is complete! The core metadata obfuscation functionality has been implemented.
+
+**What was implemented:**
+- `SnowflakeMetadataExtractor` now accepts an optional `obfuscator` parameter
+- `save_metadata_to_file()` supports obfuscation with encryption
+- `save_postgres_ddl()` supports obfuscation with encryption
+- `extract_all_configured_tables()` creates encrypted master index when obfuscation is enabled
+- `extract_metadata.py` script has `--no-obfuscate` flag and password handling
+- Password priority: `--password-file` > `ENCRYPTION_PASSWORD` env > prompt
+- Obfuscation is enabled by default (can be disabled with `--no-obfuscate`)
+
+**Next steps:**
+1. Test the implementation with actual metadata extraction
+2. Verify change detection works with obfuscated files
+3. Test backward compatibility with non-obfuscated metadata
+4. Update documentation

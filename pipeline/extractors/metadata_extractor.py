@@ -17,7 +17,7 @@ from pipeline.utils.change_logger import ChangeLogger
 logger = get_logger(__name__)
 
 class SnowflakeMetadataExtractor:
-    def __init__(self):
+    def __init__(self, obfuscator=None):
         self.settings = get_settings()
         self.metadata_dir = Path("metadata/schemas")
         self.metadata_dir.mkdir(parents=True, exist_ok=True)
@@ -25,6 +25,7 @@ class SnowflakeMetadataExtractor:
         self.ddl_dir.mkdir(parents=True, exist_ok=True)
         self.comparator = MetadataComparator()
         self.change_logger = ChangeLogger()
+        self.obfuscator = obfuscator  # Optional MetadataObfuscator instance
         
     def connect_to_snowflake(self):
         """
@@ -284,7 +285,7 @@ class SnowflakeMetadataExtractor:
         
         return archived_metadata, archived_ddl
     
-    def save_metadata_to_file(self, metadata: Dict[str, Any], table_name: str, check_changes: bool = False) -> Tuple[Path, Optional[Dict[str, Any]]]:
+    def save_metadata_to_file(self, metadata: Dict[str, Any], table_name: str, check_changes: bool = False, password: Optional[str] = None) -> Tuple[Path, Optional[Dict[str, Any]]]:
         """
         Save metadata to local JSON file in the repository
         
@@ -292,11 +293,11 @@ class SnowflakeMetadataExtractor:
             metadata: Metadata to save
             table_name: Name of the table
             check_changes: Whether to check for changes before saving
+            password: Encryption password (required if obfuscation enabled)
             
         Returns:
             Tuple of (metadata_file_path, comparison_result)
         """
-        metadata_file = self.metadata_dir / f"{table_name}_metadata.json"
         comparison = None
         
         if check_changes:
@@ -315,10 +316,36 @@ class SnowflakeMetadataExtractor:
                     comparison["summary"]
                 )
         
-        with open(metadata_file, 'w') as f:
-            json.dump(metadata, f, indent=2, default=str)
+        # Determine file path based on obfuscation
+        if self.obfuscator:
+            # Obfuscated: generate random file ID
+            if not password:
+                raise ValueError("Password required for obfuscated metadata")
+            
+            file_id = self.obfuscator.generate_metadata_file_id(table_name, "metadata")
+            metadata_file = self.metadata_dir / f"{file_id}.enc"
+            
+            # Save as temporary JSON file
+            temp_json = self.metadata_dir / f"{file_id}.json.tmp"
+            with open(temp_json, 'w') as f:
+                json.dump(metadata, f, indent=2, default=str)
+            
+            # Encrypt the file
+            logger.info(f"Encrypting metadata for {table_name}...")
+            self.obfuscator.encryptor.encrypt_file(temp_json, metadata_file, password)
+            
+            # Remove temporary file
+            temp_json.unlink()
+            
+            logger.info(f"Saved encrypted metadata to {metadata_file}")
+        else:
+            # Non-obfuscated: use table name
+            metadata_file = self.metadata_dir / f"{table_name}_metadata.json"
+            with open(metadata_file, 'w') as f:
+                json.dump(metadata, f, indent=2, default=str)
+            
+            logger.info(f"Saved metadata to {metadata_file}")
         
-        logger.info(f"Saved metadata to {metadata_file}")
         return metadata_file, comparison
     
     def generate_postgres_ddl(self, metadata: Dict[str, Any], postgres_schema: str, postgres_table: str) -> str:
@@ -350,22 +377,58 @@ class SnowflakeMetadataExtractor:
         
         return "\n".join(ddl_lines)
     
-    def save_postgres_ddl(self, ddl: str, table_name: str) -> Path:
-        """Save PostgreSQL DDL to file"""
-        ddl_file = self.ddl_dir / f"{table_name}_create.sql"
-        with open(ddl_file, 'w') as f:
-            f.write(ddl)
+    def save_postgres_ddl(self, ddl: str, table_name: str, password: Optional[str] = None) -> Path:
+        """
+        Save PostgreSQL DDL to file
         
-        logger.info(f"Saved DDL to {ddl_file}")
+        Args:
+            ddl: DDL string to save
+            table_name: Name of the table
+            password: Encryption password (required if obfuscation enabled)
+            
+        Returns:
+            Path to saved DDL file
+        """
+        # Determine file path based on obfuscation
+        if self.obfuscator:
+            # Obfuscated: generate random file ID
+            if not password:
+                raise ValueError("Password required for obfuscated DDL")
+            
+            file_id = self.obfuscator.generate_metadata_file_id(table_name, "ddl")
+            ddl_file = self.ddl_dir / f"{file_id}.enc"
+            
+            # Save as temporary SQL file
+            temp_sql = self.ddl_dir / f"{file_id}.sql.tmp"
+            with open(temp_sql, 'w') as f:
+                f.write(ddl)
+            
+            # Encrypt the file
+            logger.info(f"Encrypting DDL for {table_name}...")
+            self.obfuscator.encryptor.encrypt_file(temp_sql, ddl_file, password)
+            
+            # Remove temporary file
+            temp_sql.unlink()
+            
+            logger.info(f"Saved encrypted DDL to {ddl_file}")
+        else:
+            # Non-obfuscated: use table name
+            ddl_file = self.ddl_dir / f"{table_name}_create.sql"
+            with open(ddl_file, 'w') as f:
+                f.write(ddl)
+            
+            logger.info(f"Saved DDL to {ddl_file}")
+        
         return ddl_file
     
-    def extract_all_configured_tables(self, check_changes: bool = False, force: bool = False) -> Dict[str, Any]:
+    def extract_all_configured_tables(self, check_changes: bool = False, force: bool = False, password: Optional[str] = None) -> Dict[str, Any]:
         """
         Extract metadata for all tables in config/tables.yaml
         
         Args:
             check_changes: Whether to check for metadata changes
             force: Force re-extraction even if no changes detected
+            password: Encryption password (required if obfuscation enabled)
             
         Returns:
             Dictionary with extraction results for each table
@@ -375,6 +438,7 @@ class SnowflakeMetadataExtractor:
             config = yaml.safe_load(f)
         
         results = {}
+        table_mappings = []  # For master index if obfuscation enabled
         
         for table_config in config["tables"]:
             table_name = table_config["name"]
@@ -395,7 +459,8 @@ class SnowflakeMetadataExtractor:
                 metadata_file, comparison = self.save_metadata_to_file(
                     metadata, 
                     table_name, 
-                    check_changes=check_changes
+                    check_changes=check_changes,
+                    password=password
                 )
                 
                 # Determine if we should skip DDL generation
@@ -412,7 +477,20 @@ class SnowflakeMetadataExtractor:
                 )
                 
                 # Save DDL to file
-                ddl_file = self.save_postgres_ddl(ddl, table_name)
+                ddl_file = self.save_postgres_ddl(ddl, table_name, password=password)
+                
+                # If obfuscation enabled, track file mappings
+                if self.obfuscator:
+                    # Extract file IDs from paths
+                    metadata_file_id = metadata_file.stem  # Remove .enc extension
+                    ddl_file_id = ddl_file.stem  # Remove .enc extension
+                    
+                    table_mappings.append({
+                        "table_name": table_name,
+                        "metadata_file_id": metadata_file_id,
+                        "ddl_file_id": ddl_file_id,
+                        "extracted_at": metadata["extracted_at"]
+                    })
                 
                 results[table_name] = {
                     "status": "success",
@@ -431,6 +509,24 @@ class SnowflakeMetadataExtractor:
                     "status": "error",
                     "error": str(e)
                 }
+        
+        # Create master index if obfuscation enabled
+        if self.obfuscator and table_mappings:
+            if not password:
+                raise ValueError("Password required for obfuscated metadata master index")
+            
+            try:
+                index_path = Path("metadata") / "index.enc"
+                index_info = self.obfuscator.create_metadata_master_index(
+                    table_mappings,
+                    index_path,
+                    password
+                )
+                logger.info(f"Created metadata master index: {index_path}")
+                logger.info(f"  Tables indexed: {index_info['table_count']}")
+            except Exception as e:
+                logger.error(f"Failed to create metadata master index: {e}")
+                # Don't fail the entire extraction if index creation fails
         
         return results
 

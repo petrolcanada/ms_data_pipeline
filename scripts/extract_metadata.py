@@ -5,6 +5,7 @@ Run this script to extract metadata from Snowflake tables and generate PostgreSQ
 """
 import sys
 import argparse
+import getpass
 from pathlib import Path
 from datetime import datetime
 
@@ -13,6 +14,51 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from pipeline.extractors.metadata_extractor import SnowflakeMetadataExtractor
 from pipeline.loaders.postgres_loader import PostgreSQLLoader
+from pipeline.transformers.obfuscator import MetadataObfuscator
+from pipeline.config.settings import get_settings
+
+
+def get_password(from_env: bool = True, password_file: str = None) -> str:
+    """
+    Get encryption password from various sources
+    
+    Priority:
+    1. Password file (if specified)
+    2. Environment variable (if from_env=True)
+    3. Interactive prompt
+    
+    Args:
+        from_env: Whether to check environment variable
+        password_file: Path to file containing password
+        
+    Returns:
+        Password string
+    """
+    # Try password file first
+    if password_file:
+        try:
+            with open(password_file, 'r') as f:
+                password = f.read().strip()
+            if password:
+                print(f"Using password from file: {password_file}")
+                return password
+        except Exception as e:
+            print(f"Warning: Could not read password file: {e}")
+    
+    # Try environment variable
+    if from_env:
+        settings = get_settings()
+        if settings.encryption_password:
+            print("Using password from ENCRYPTION_PASSWORD environment variable")
+            return settings.encryption_password
+    
+    # Prompt user
+    password = getpass.getpass("Enter encryption password: ")
+    if not password:
+        raise ValueError("Password cannot be empty")
+    
+    return password
+
 
 def main():
     parser = argparse.ArgumentParser(description="Extract metadata from Snowflake tables")
@@ -22,6 +68,8 @@ def main():
     parser.add_argument("--force", action="store_true", help="Force re-extraction even if no changes detected")
     parser.add_argument("--create-postgres", action="store_true", help="Also create PostgreSQL tables")
     parser.add_argument("--drop-existing", action="store_true", help="Drop existing PostgreSQL tables")
+    parser.add_argument("--no-obfuscate", action="store_true", help="Disable name obfuscation (enabled by default)")
+    parser.add_argument("--password-file", help="Path to file containing encryption password")
     
     args = parser.parse_args()
     
@@ -29,7 +77,31 @@ def main():
         print("Error: Must specify either --table <name> or --all")
         sys.exit(1)
     
-    extractor = SnowflakeMetadataExtractor()
+    # Determine if obfuscation should be enabled
+    settings = get_settings()
+    obfuscate = not args.no_obfuscate and settings.obfuscate_names
+    
+    # Initialize obfuscator and get password if obfuscation enabled
+    obfuscator = None
+    password = None
+    
+    if obfuscate:
+        print("Obfuscation: ENABLED")
+        obfuscator = MetadataObfuscator()
+        
+        # Get password for encryption
+        try:
+            password = get_password(from_env=True, password_file=args.password_file)
+        except Exception as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+    else:
+        print("Obfuscation: DISABLED")
+    
+    print()
+    
+    # Initialize extractor with optional obfuscator
+    extractor = SnowflakeMetadataExtractor(obfuscator=obfuscator)
     
     if args.table:
         # Extract single table
@@ -44,7 +116,8 @@ def main():
         
         results = extractor.extract_all_configured_tables(
             check_changes=args.check_changes,
-            force=args.force
+            force=args.force,
+            password=password
         )
         
         # Display change alerts first
@@ -112,6 +185,16 @@ def main():
             else:
                 print(f"✗ {table}")
                 print(f"  Error: {result['error']}")
+            print()
+        
+        # Display obfuscation status
+        if obfuscate:
+            print("=" * 50)
+            print("Obfuscation Summary:")
+            print(f"  • Metadata files encrypted with random names")
+            print(f"  • DDL files encrypted with random names")
+            print(f"  • Master index created: metadata/index.enc")
+            print(f"  • Use same password to decrypt files")
             print()
         
         # Create PostgreSQL tables if requested
