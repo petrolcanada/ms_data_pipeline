@@ -152,8 +152,13 @@ class SnowflakeDataExtractor:
                 {filter_clause}
                 """
                 
+                # Log and print query BEFORE execution
                 logger.info(f"Estimating filtered table size...")
                 logger.info(f"  Count query: {count_query.strip()}")
+                print(f"\n🔍 Executing count query:")
+                print(f"{count_query.strip()}")
+                
+                # Now execute
                 cursor.execute(count_query)
                 row_count = cursor.fetchone()[0] or 0
                 
@@ -219,6 +224,15 @@ class SnowflakeDataExtractor:
                     }
                 else:
                     raise ValueError(f"Table {database}.{schema}.{table} not found")
+        
+        except Exception as e:
+            # Log the error with context
+            logger.error(f"Failed to estimate table size: {e}")
+            if filter_clause:
+                logger.error(f"  Failed query was: SELECT COUNT(*) FROM {database}.{schema}.{table} {filter_clause}")
+                print(f"\n❌ Query execution failed!")
+                print(f"   Error: {e}")
+            raise
                 
         finally:
             cursor.close()
@@ -261,12 +275,15 @@ class SnowflakeDataExtractor:
             if order_by:
                 query += f" ORDER BY {order_by}"
             
-            # Log query BEFORE execution
+            # Log and print query BEFORE execution
             logger.info(f"Extracting data from {database}.{schema}.{table}")
             if filter_clause:
                 logger.info(f"  Filter: {filter_clause}")
             logger.info(f"  Chunk size: {chunk_size:,} rows")
             logger.info(f"  Full query: {query}")
+            
+            print(f"\n🔍 Executing data extraction query:")
+            print(f"{query}")
             
             # Execute query
             cursor.execute(query)
@@ -299,6 +316,9 @@ class SnowflakeDataExtractor:
         except Exception as e:
             logger.error(f"Failed to extract data: {e}")
             logger.error(f"Query was: {query}")
+            print(f"\n❌ Data extraction query failed!")
+            print(f"   Error: {e}")
+            print(f"   Query was: {query}")
             raise
         finally:
             cursor.close()
