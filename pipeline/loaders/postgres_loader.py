@@ -172,6 +172,7 @@ class PostgreSQLLoader:
             pg_columns = cursor.fetchall()
             
             # Compare with Snowflake metadata
+            # Note: PostgreSQL has 1 extra column (data_inserted_at) that's not in Snowflake
             verification = {
                 "table": f"{postgres_schema}.{postgres_table}",
                 "snowflake_columns": len(metadata["columns"]),
@@ -180,16 +181,21 @@ class PostgreSQLLoader:
                 "differences": []
             }
             
-            if len(metadata["columns"]) != len(pg_columns):
+            # Expected: PG columns = SF columns + 1 (data_inserted_at)
+            expected_pg_columns = len(metadata["columns"]) + 1
+            if len(pg_columns) != expected_pg_columns:
                 verification["matches"] = False
                 verification["differences"].append(
-                    f"Column count mismatch: SF={len(metadata['columns'])}, PG={len(pg_columns)}"
+                    f"Column count mismatch: SF={len(metadata['columns'])}, PG={len(pg_columns)} (expected {expected_pg_columns} with data_inserted_at)"
                 )
             
-            # Check individual columns
+            # Check individual columns (skip data_inserted_at which is first column)
             sf_cols = {col["name"]: col for col in metadata["columns"]}
             for pg_col in pg_columns:
                 col_name = pg_col[0]
+                # Skip the data_inserted_at column
+                if col_name == "data_inserted_at":
+                    continue
                 if col_name not in sf_cols:
                     verification["matches"] = False
                     verification["differences"].append(f"Column {col_name} exists in PG but not SF")

@@ -371,6 +371,11 @@ class SnowflakeMetadataExtractor:
         ddl_lines = [f"CREATE TABLE IF NOT EXISTS {postgres_schema}.{postgres_table} ("]
         
         column_definitions = []
+        
+        # Add insertion timestamp column as the first column
+        column_definitions.append("    data_inserted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL")
+        
+        # Add all original columns from Snowflake
         for col in metadata["columns"]:
             col_def = f"    {col['name']} {col['postgres_type']}"
             if not col['is_nullable']:
@@ -392,6 +397,7 @@ class SnowflakeMetadataExtractor:
         ddl_lines.append(f"\n-- Source: {metadata['table_info']['full_name']}")
         ddl_lines.append(f"-- Extracted: {metadata['extracted_at']}")
         ddl_lines.append(f"-- Rows: {metadata['statistics']['row_count']}")
+        ddl_lines.append(f"-- Note: data_inserted_at column tracks when data was inserted into PostgreSQL")
         
         return "\n".join(ddl_lines)
     

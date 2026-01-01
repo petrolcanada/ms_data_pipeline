@@ -60,19 +60,24 @@ class PostgreSQLDataLoader:
             total_rows = len(df)
             logger.info(f"  Rows: {total_rows:,}")
             
-            # Get column names
+            # Get column names from DataFrame
             columns = df.columns.tolist()
             
             # Prepare INSERT statement
+            # Note: data_inserted_at column is NOT in the Parquet file
+            # It will be automatically populated by PostgreSQL DEFAULT CURRENT_TIMESTAMP
             placeholders = ','.join(['%s'] * len(columns))
             columns_str = ','.join([f'"{col}"' for col in columns])
             insert_sql = f'INSERT INTO {schema}.{table} ({columns_str}) VALUES ({placeholders})'
+            
+            logger.debug(f"Insert SQL: {insert_sql}")
             
             # Convert DataFrame to list of tuples
             data = [tuple(row) for row in df.values]
             
             # Batch insert
             logger.info(f"Loading to {schema}.{table}")
+            logger.info(f"  Note: data_inserted_at will be auto-populated with current timestamp")
             execute_batch(cursor, insert_sql, data, page_size=batch_size)
             conn.commit()
             

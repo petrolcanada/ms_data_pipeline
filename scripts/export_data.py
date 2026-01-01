@@ -70,7 +70,8 @@ def export_table(
     obfuscator: Optional[DataObfuscator] = None,
     chunk_size: int = 100000,
     compression: str = 'zstd',
-    compression_level: int = 3
+    compression_level: int = 3,
+    clean: bool = False
 ):
     """
     Export a single table
@@ -84,6 +85,7 @@ def export_table(
         chunk_size: Rows per chunk
         compression: Compression algorithm
         compression_level: Compression level
+        clean: If True, delete existing export folder before starting
         
     Returns:
         Dictionary with export metadata including folder_id and manifest_file_id if obfuscated
@@ -110,6 +112,16 @@ def export_table(
     
     # Create export directory
     export_dir = Path(export_base_dir) / folder_name
+    
+    # Clean up existing folder if requested
+    if clean and export_dir.exists():
+        import shutil
+        print(f"🧹 Cleaning up existing export folder...")
+        print(f"   Deleting: {export_dir}")
+        shutil.rmtree(export_dir)
+        logger.info(f"Deleted existing export folder: {export_dir}")
+        print(f"   ✅ Folder deleted")
+    
     export_dir.mkdir(parents=True, exist_ok=True)
     
     logger.info(f"Export directory: {export_dir}")
@@ -343,6 +355,11 @@ def main():
         action="store_true",
         help="Disable name obfuscation (obfuscation is enabled by default)"
     )
+    parser.add_argument(
+        "--clean",
+        action="store_true",
+        help="Delete existing export folder before starting (useful for re-runs during testing)"
+    )
     
     args = parser.parse_args()
     
@@ -404,7 +421,8 @@ def main():
                     export_base_dir,
                     conn_manager,
                     obfuscator=obfuscator,
-                    chunk_size=args.chunk_size
+                    chunk_size=args.chunk_size,
+                    clean=args.clean
                 )
             else:
                 # Export all tables
@@ -420,7 +438,8 @@ def main():
                             export_base_dir,
                             conn_manager,
                             obfuscator=obfuscator,
-                            chunk_size=args.chunk_size
+                            chunk_size=args.chunk_size,
+                            clean=args.clean
                         )
                     except Exception as e:
                         logger.error(f"Failed to export {table_config['name']}: {e}")
