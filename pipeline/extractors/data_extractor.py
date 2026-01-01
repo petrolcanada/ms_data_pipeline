@@ -8,6 +8,7 @@ from typing import Dict, Any, Generator, Optional
 import snowflake.connector
 from pipeline.config.settings import get_settings
 from pipeline.connections import SnowflakeConnectionManager
+from pipeline.transformers.type_optimizer import optimize_dataframe
 from pipeline.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -333,7 +334,8 @@ class SnowflakeDataExtractor:
         df: pd.DataFrame, 
         output_path: Path, 
         compression: str = 'zstd',
-        compression_level: int = 3
+        compression_level: int = 3,
+        optimize_types: bool = True
     ) -> Dict[str, Any]:
         """
         Save DataFrame chunk as compressed Parquet file
@@ -341,8 +343,9 @@ class SnowflakeDataExtractor:
         Args:
             df: DataFrame to save
             output_path: Output file path
-            compression: Compression algorithm (snappy, gzip, zstd)
-            compression_level: Compression level (1-9 for gzip/zstd)
+            compression: Compression algorithm (snappy, gzip, zstd, brotli)
+            compression_level: Compression level (1-9 for gzip, 1-22 for zstd, 0-11 for brotli)
+            optimize_types: If True, optimize data types before compression
             
         Returns:
             Dictionary with file metadata
@@ -351,12 +354,18 @@ class SnowflakeDataExtractor:
             # Ensure output directory exists
             output_path.parent.mkdir(parents=True, exist_ok=True)
             
+            # Optimize data types for better compression
+            optimization_stats = None
+            if optimize_types:
+                logger.info("Optimizing data types for better compression...")
+                df, optimization_stats = optimize_dataframe(df, aggressive=False)
+            
             # Save as Parquet with compression
             df.to_parquet(
                 output_path,
                 engine='pyarrow',
                 compression=compression,
-                compression_level=compression_level if compression in ['gzip', 'zstd'] else None,
+                compression_level=compression_level if compression in ['gzip', 'zstd', 'brotli'] else None,
                 index=False
             )
             
@@ -365,14 +374,20 @@ class SnowflakeDataExtractor:
             logger.info(f"Saved {output_path.name}")
             logger.debug(f"  Rows: {len(df):,}")
             logger.debug(f"  Size: {file_size / (1024 * 1024):.2f} MB")
-            logger.debug(f"  Compression: {compression}")
+            logger.debug(f"  Compression: {compression} (level {compression_level})")
             
-            return {
+            result = {
                 "rows": len(df),
                 "size_bytes": file_size,
                 "size_mb": file_size / (1024 * 1024),
-                "compression": compression
+                "compression": compression,
+                "compression_level": compression_level
             }
+            
+            if optimization_stats:
+                result["type_optimization"] = optimization_stats
+            
+            return result
             
         except Exception as e:
             logger.error(f"Failed to save Parquet file: {e}")

@@ -372,6 +372,10 @@ def main():
         settings = get_settings()
         export_base_dir = getattr(settings, 'export_base_dir', 'exports')
         
+        # Get compression settings from environment
+        compression_type = getattr(settings, 'compression_type', 'zstd')
+        compression_level = getattr(settings, 'compression_level', 3)
+        
         # Determine if obfuscation should be enabled
         # Priority: --no-obfuscate flag > OBFUSCATE_NAMES env > default (True)
         if args.no_obfuscate:
@@ -422,6 +426,8 @@ def main():
                     conn_manager,
                     obfuscator=obfuscator,
                     chunk_size=args.chunk_size,
+                    compression=compression_type,
+                    compression_level=compression_level,
                     clean=args.clean
                 )
             else:
@@ -439,6 +445,8 @@ def main():
                             conn_manager,
                             obfuscator=obfuscator,
                             chunk_size=args.chunk_size,
+                            compression=compression_type,
+                            compression_level=compression_level,
                             clean=args.clean
                         )
                     except Exception as e:
