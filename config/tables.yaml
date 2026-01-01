@@ -41,7 +41,7 @@ tables:
         - "AND _TIMESTAMPTO LIKE '%9999%'"
     postgres:
       schema: "ms"
-      table: "FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND"
+      table: "FUND_ATTRIBUTES_CA_OPENEND"
     sync_mode: "full"
     schedule: "daily"
     encryption: true
