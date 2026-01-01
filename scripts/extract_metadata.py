@@ -106,8 +106,138 @@ def main():
     if args.table:
         # Extract single table
         print(f"Extracting metadata for table: {args.table}")
-        # Implementation for single table would go here
-        print("Single table extraction not implemented yet - use --all for now")
+        
+        # Load table configuration
+        import yaml
+        with open("config/tables.yaml", 'r') as f:
+            config = yaml.safe_load(f)
+        
+        # Find the table configuration
+        table_config = next(
+            (t for t in config['tables'] if t['name'] == args.table),
+            None
+        )
+        
+        if not table_config:
+            print(f"Error: Table '{args.table}' not found in config/tables.yaml")
+            sys.exit(1)
+        
+        sf_config = table_config['snowflake']
+        pg_config = table_config['postgres']
+        
+        try:
+            # Extract metadata from Snowflake
+            metadata = extractor.extract_table_metadata(
+                sf_config['database'],
+                sf_config['schema'],
+                sf_config['table']
+            )
+            
+            # Save metadata to file (with optional change checking)
+            metadata_file, comparison = extractor.save_metadata_to_file(
+                metadata,
+                args.table,
+                check_changes=args.check_changes,
+                password=password
+            )
+            
+            # Display change alerts if checking changes
+            if args.check_changes and comparison:
+                if comparison.get("has_changes"):
+                    print("\n" + "=" * 70)
+                    print("⚠️  METADATA CHANGES DETECTED!")
+                    print("=" * 70)
+                    print(f"\nTable: {args.table}")
+                    print(f"Summary: {comparison['summary']}")
+                    
+                    if comparison["changes"]:
+                        print("\nDetailed Changes:")
+                        for change in comparison["changes"]:
+                            change_type = change["type"]
+                            if change_type == "column_added":
+                                print(f"  + Column added: {change['column']} ({change['data_type']})")
+                            elif change_type == "column_removed":
+                                print(f"  - Column removed: {change['column']} ({change['data_type']})")
+                            elif change_type == "type_changed":
+                                print(f"  ~ Type changed: {change['column']}")
+                                print(f"      {change['old_type']} → {change['new_type']}")
+                            elif change_type == "nullable_changed":
+                                nullable_str = "NULL" if change['new_nullable'] else "NOT NULL"
+                                print(f"  ~ Nullable changed: {change['column']} → {nullable_str}")
+                            elif change_type == "position_changed":
+                                print(f"  ~ Position changed: {change['column']}")
+                                print(f"      Position {change['old_position']} → {change['new_position']}")
+                    
+                    print(f"\nArchived old metadata:")
+                    print(f"  • metadata/schemas/{args.table}_{datetime.now().strftime('%Y%m%d')}_metadata.json")
+                    print(f"  • metadata/ddl/{args.table}_{datetime.now().strftime('%Y%m%d')}_create.sql")
+                    print("=" * 70)
+                    print()
+                else:
+                    print("\n✓ No metadata changes detected\n")
+            
+            # Generate PostgreSQL DDL
+            ddl = extractor.generate_postgres_ddl(
+                metadata,
+                pg_config['schema'],
+                pg_config['table']
+            )
+            
+            # Save DDL to file
+            ddl_file = extractor.save_postgres_ddl(ddl, args.table, password=password)
+            
+            # Display results
+            print("\nMetadata Extraction Results:")
+            print("=" * 50)
+            print(f"✓ {args.table}")
+            print(f"  Columns: {len(metadata['columns'])}")
+            print(f"  Rows: {metadata['statistics']['row_count']:,}")
+            print(f"  Metadata: {metadata_file}")
+            print(f"  DDL: {ddl_file}")
+            print()
+            
+            # Display obfuscation status
+            if obfuscate:
+                print("=" * 50)
+                print("Obfuscation Summary:")
+                print(f"  • Metadata file encrypted with deterministic name")
+                print(f"  • DDL file encrypted with deterministic name")
+                print(f"  • File IDs are consistent across runs (same table = same ID)")
+                print(f"  • Use same password to decrypt files")
+                print()
+            
+            # Create PostgreSQL table if requested
+            if args.create_postgres:
+                print("Creating PostgreSQL table...")
+                loader = PostgreSQLLoader()
+                result = loader.create_table_from_metadata(
+                    args.table,
+                    drop_if_exists=args.drop_existing
+                )
+                
+                print("\nPostgreSQL Table Creation Results:")
+                print("=" * 50)
+                if result["status"] == "success":
+                    print(f"✓ {args.table}")
+                    print(f"  Schema: {result['schema']}")
+                    print(f"  Table: {result['table']}")
+                    print(f"  Columns: {result['columns']}")
+                    if result.get("verification"):
+                        verification = result["verification"]
+                        status = "✓" if verification["matches"] else "✗"
+                        print(f"  Verification: {status}")
+                        if verification["differences"]:
+                            for diff in verification["differences"]:
+                                print(f"    - {diff}")
+                else:
+                    print(f"✗ {args.table}")
+                    print(f"  Error: {result['error']}")
+                print()
+                
+        except Exception as e:
+            print(f"\n✗ Failed to extract metadata for {args.table}")
+            print(f"  Error: {e}")
+            sys.exit(1)
     else:
         # Extract all tables
         print("Extracting metadata for all configured tables...")
