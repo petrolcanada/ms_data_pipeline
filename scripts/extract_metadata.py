@@ -64,7 +64,7 @@ def main():
     parser = argparse.ArgumentParser(description="Extract metadata from Snowflake tables")
     parser.add_argument("--table", help="Extract metadata for specific table")
     parser.add_argument("--all", action="store_true", help="Extract metadata for all configured tables")
-    parser.add_argument("--check-changes", action="store_true", help="Check for metadata changes and alert if detected")
+    parser.add_argument("--no-check-changes", action="store_true", help="Disable metadata change detection (enabled by default)")
     parser.add_argument("--force", action="store_true", help="Force re-extraction even if no changes detected")
     parser.add_argument("--create-postgres", action="store_true", help="Also create PostgreSQL tables")
     parser.add_argument("--drop-existing", action="store_true", help="Drop existing PostgreSQL tables")
@@ -72,6 +72,9 @@ def main():
     parser.add_argument("--password-file", help="Path to file containing encryption password")
     
     args = parser.parse_args()
+    
+    # Change detection is enabled by default
+    check_changes = not args.no_check_changes
     
     if not args.table and not args.all:
         print("Error: Must specify either --table <name> or --all")
@@ -133,16 +136,16 @@ def main():
                 sf_config['table']
             )
             
-            # Save metadata to file (with optional change checking)
+            # Save metadata to file (with change checking enabled by default)
             metadata_file, comparison = extractor.save_metadata_to_file(
                 metadata,
                 args.table,
-                check_changes=args.check_changes,
+                check_changes=check_changes,
                 password=password
             )
             
             # Display change alerts if checking changes
-            if args.check_changes and comparison:
+            if check_changes and comparison:
                 if comparison.get("has_changes"):
                     print("\n" + "=" * 70)
                     print("⚠️  METADATA CHANGES DETECTED!")
@@ -241,17 +244,19 @@ def main():
     else:
         # Extract all tables
         print("Extracting metadata for all configured tables...")
-        if args.check_changes:
+        if check_changes:
             print("Change detection enabled - will alert on metadata changes\n")
+        else:
+            print("Change detection disabled\n")
         
         results = extractor.extract_all_configured_tables(
-            check_changes=args.check_changes,
+            check_changes=check_changes,
             force=args.force,
             password=password
         )
         
         # Display change alerts first
-        if args.check_changes:
+        if check_changes:
             changes_detected = False
             for table, result in results.items():
                 if result["status"] == "success" and result.get("has_changes"):
@@ -299,7 +304,7 @@ def main():
         for table, result in results.items():
             if result["status"] == "success":
                 status_icon = "✓"
-                if args.check_changes:
+                if check_changes:
                     if result.get("is_new"):
                         status_icon = "✓ [NEW]"
                     elif result.get("has_changes"):

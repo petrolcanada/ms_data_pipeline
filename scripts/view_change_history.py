@@ -45,7 +45,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # View all changes for a table
+  # View all changes for a table (obfuscation enabled by default)
   python scripts/view_change_history.py --table FUND_SHARE_CLASS_BASIC_INFO
   
   # View last 5 changes
@@ -56,6 +56,9 @@ Examples:
   
   # View summary of all tables with changes
   python scripts/view_change_history.py --summary
+  
+  # View non-obfuscated change logs
+  python scripts/view_change_history.py --table FUND_SHARE_CLASS_BASIC_INFO --no-obfuscate
         """
     )
     
@@ -98,9 +101,9 @@ Examples:
     )
     
     parser.add_argument(
-        '--obfuscated',
+        '--no-obfuscate',
         action='store_true',
-        help='Change logs are encrypted/obfuscated'
+        help='Change logs are NOT encrypted/obfuscated (obfuscation enabled by default)'
     )
     
     args = parser.parse_args()
@@ -112,10 +115,14 @@ Examples:
     if args.table and args.summary:
         parser.error("Cannot specify both --table and --summary")
     
-    # Get password if obfuscated
+    # Determine if obfuscation is enabled (default: True, based on settings)
+    settings = get_settings()
+    obfuscated = not args.no_obfuscate and settings.obfuscate_names
+    
+    # Get password and obfuscator if obfuscation enabled
     password = None
     obfuscator = None
-    if args.obfuscated:
+    if obfuscated:
         password = get_password_from_env_or_prompt(args.password)
         obfuscator = MetadataObfuscator()
     

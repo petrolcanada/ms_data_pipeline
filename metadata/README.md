@@ -136,6 +136,8 @@ Change logs are written to `changes/{table_name}_changes.log` and include:
 
 ## Related Documentation
 
+- **[Metadata Workflow Guide](../docs/metadata-workflow-guide.md)** - Complete step-by-step workflows
+- **[Quick Reference](../docs/metadata-quick-reference.md)** - Command cheat sheet
 - [Metadata Change Tracking Guide](../docs/metadata-change-tracking.md)
 - [Command Reference](../docs/command-reference.md)
 - [Complete Workflow](../docs/complete-workflow.md)
