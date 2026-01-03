@@ -96,3 +96,6 @@ htmlcov/
 .mypy_cache/
 .dmypy.json
 dmypy.json
+
+# Decrypted metadata files (temporary, not tracked)
+metadata/decrypted/

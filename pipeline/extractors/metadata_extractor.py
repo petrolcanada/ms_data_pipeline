@@ -24,7 +24,7 @@ class SnowflakeMetadataExtractor:
         self.ddl_dir = Path("metadata/ddl")
         self.ddl_dir.mkdir(parents=True, exist_ok=True)
         self.comparator = MetadataComparator()
-        self.change_logger = ChangeLogger()
+        self.change_logger = ChangeLogger(obfuscator=obfuscator)
         self.obfuscator = obfuscator  # Optional MetadataObfuscator instance
         
     def connect_to_snowflake(self):
@@ -273,6 +273,61 @@ class SnowflakeMetadataExtractor:
             logger.error(f"Error comparing metadata for {table_name}: {e}")
             return None
     
+    def check_metadata_changed_obfuscated(
+        self,
+        table_name: str,
+        new_metadata: Dict[str, Any],
+        password: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Check for changes when obfuscation is enabled
+        
+        Decrypts the previous metadata file, compares with new metadata,
+        then returns comparison results.
+        
+        Args:
+            table_name: Name of the table
+            new_metadata: Newly extracted metadata
+            password: Decryption password
+            
+        Returns:
+            Comparison result dict or None if first extraction
+        """
+        # Get file ID for this table
+        file_id = self.obfuscator.generate_metadata_file_id(table_name, "metadata")
+        encrypted_file = self.metadata_dir / f"{file_id}.enc"
+        
+        if not encrypted_file.exists():
+            logger.info(f"No existing metadata found for {table_name} - this is the first extraction")
+            return None
+        
+        try:
+            # Decrypt to temporary file
+            temp_json = self.metadata_dir / f"{file_id}_temp.json"
+            self.obfuscator.encryptor.decrypt_file(encrypted_file, temp_json, password)
+            
+            # Load decrypted metadata
+            with open(temp_json, 'r') as f:
+                old_metadata = json.load(f)
+            
+            # Remove temporary file
+            temp_json.unlink()
+            
+            # Compare metadata
+            comparison = self.comparator.compare_metadata(old_metadata, new_metadata)
+            
+            if comparison["changed"]:
+                logger.warning(f"⚠️  Metadata changes detected for {table_name}")
+                logger.warning(f"   {comparison['summary']}")
+            else:
+                logger.info(f"No metadata changes detected for {table_name}")
+            
+            return comparison
+            
+        except Exception as e:
+            logger.error(f"Error comparing obfuscated metadata for {table_name}: {e}")
+            return None
+    
     def archive_old_metadata(self, table_name: str) -> Tuple[Optional[Path], Optional[Path]]:
         """
         Archive existing metadata and DDL files with timestamp
@@ -303,6 +358,43 @@ class SnowflakeMetadataExtractor:
         
         return archived_metadata, archived_ddl
     
+    def archive_old_metadata_obfuscated(
+        self,
+        table_name: str
+    ) -> Tuple[Optional[Path], Optional[Path]]:
+        """
+        Archive obfuscated metadata files with timestamp
+        
+        Args:
+            table_name: Name of the table
+            
+        Returns:
+            Tuple of (archived_metadata_path, archived_ddl_path)
+        """
+        date_str = datetime.now().strftime("%Y%m%d")
+        
+        # Get file IDs for this table
+        metadata_file_id = self.obfuscator.generate_metadata_file_id(table_name, "metadata")
+        ddl_file_id = self.obfuscator.generate_metadata_file_id(table_name, "ddl")
+        
+        # Archive metadata file
+        metadata_file = self.metadata_dir / f"{metadata_file_id}.enc"
+        archived_metadata = None
+        if metadata_file.exists():
+            archived_metadata = self.metadata_dir / f"{metadata_file_id}_{date_str}.enc"
+            metadata_file.rename(archived_metadata)
+            logger.info(f"Archived obfuscated metadata to {archived_metadata}")
+        
+        # Archive DDL file
+        ddl_file = self.ddl_dir / f"{ddl_file_id}.enc"
+        archived_ddl = None
+        if ddl_file.exists():
+            archived_ddl = self.ddl_dir / f"{ddl_file_id}_{date_str}.enc"
+            ddl_file.rename(archived_ddl)
+            logger.info(f"Archived obfuscated DDL to {archived_ddl}")
+        
+        return archived_metadata, archived_ddl
+    
     def save_metadata_to_file(self, metadata: Dict[str, Any], table_name: str, check_changes: bool = False, password: Optional[str] = None) -> Tuple[Path, Optional[Dict[str, Any]]]:
         """
         Save metadata to local JSON file in the repository
@@ -317,26 +409,56 @@ class SnowflakeMetadataExtractor:
             Tuple of (metadata_file_path, comparison_result)
         """
         comparison = None
+        archived_files = None
         
         if check_changes:
-            comparison = self.check_metadata_changed(table_name, metadata)
+            # Check for changes (obfuscated or non-obfuscated)
+            if self.obfuscator and password:
+                comparison = self.check_metadata_changed_obfuscated(table_name, metadata, password)
+            else:
+                comparison = self.check_metadata_changed(table_name, metadata)
             
             if comparison is None:
-                # First extraction
-                self.change_logger.log_initial_extraction(table_name)
-            elif comparison["has_changes"]:
+                # First extraction - log it
+                created_files = None
+                if self.obfuscator:
+                    metadata_file_id = self.obfuscator.generate_metadata_file_id(table_name, "metadata")
+                    ddl_file_id = self.obfuscator.generate_metadata_file_id(table_name, "ddl")
+                    created_files = {
+                        'metadata': self.metadata_dir / f"{metadata_file_id}.enc",
+                        'ddl': self.ddl_dir / f"{ddl_file_id}.enc"
+                    }
+                else:
+                    created_files = {
+                        'metadata': self.metadata_dir / f"{table_name}_metadata.json",
+                        'ddl': self.ddl_dir / f"{table_name}_create.sql"
+                    }
+                self.change_logger.log_initial_extraction(table_name, created_files, password)
+                
+            elif comparison.get("changed"):
                 # Archive old files before saving new ones
-                self.archive_old_metadata(table_name)
-                # Log the changes
+                if self.obfuscator:
+                    archived_metadata, archived_ddl = self.archive_old_metadata_obfuscated(table_name)
+                else:
+                    archived_metadata, archived_ddl = self.archive_old_metadata(table_name)
+                
+                archived_files = {
+                    'metadata': archived_metadata,
+                    'ddl': archived_ddl
+                }
+                
+                # Log the changes with archived file paths
                 self.change_logger.log_change(
                     table_name, 
                     comparison["changes"], 
-                    comparison["summary"]
+                    comparison["summary"],
+                    archived_files,
+                    password
                 )
         
         # Determine file path based on obfuscation
         if self.obfuscator:
-            # Obfuscated: generate random file ID
+            # Obfuscated: generate deterministic file ID
             if not password:
                 raise ValueError("Password required for obfuscated metadata")
             
