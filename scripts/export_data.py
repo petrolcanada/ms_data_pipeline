@@ -12,9 +12,11 @@ import sys
 import json
 import argparse
 import getpass
+import hashlib
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
+from dataclasses import dataclass
 
 # Add project root to path
 sys.path.append(str(Path(__file__).parent.parent))
@@ -28,6 +30,28 @@ from pipeline.utils.logger import get_logger
 import yaml
 
 logger = get_logger(__name__)
+
+
+@dataclass
+class ExportStatistics:
+    """Statistics for an export operation."""
+    total_chunks: int = 0
+    chunks_new: int = 0          # Files that didn't exist before
+    chunks_changed: int = 0      # Files that existed but content changed
+    chunks_unchanged: int = 0    # Files that were skipped (identical)
+    manifest_written: bool = False   # Whether manifest was written
+    
+    @property
+    def chunks_written(self) -> int:
+        """Total chunks written (new + changed)."""
+        return self.chunks_new + self.chunks_changed
+    
+    @property
+    def unchanged_percentage(self) -> float:
+        """Percentage of chunks that were unchanged."""
+        if self.total_chunks == 0:
+            return 0.0
+        return (self.chunks_unchanged / self.total_chunks) * 100
 
 
 def get_password(password_file: str = None, from_env: str = None) -> str:
@@ -130,6 +154,13 @@ def export_table(
     extractor = SnowflakeDataExtractor(conn_manager)
     encryptor = FileEncryptor()
     
+    # Initialize content hash comparator for change detection
+    from pipeline.utils.content_hash_comparator import ContentHashComparator
+    comparator = ContentHashComparator(encryptor)
+    
+    # Initialize statistics tracking
+    stats = ExportStatistics()
+    
     # Build filter clause from configuration
     filter_config = sf_config.get('filter')
     filter_clause = extractor._build_filter_clause(filter_config)
@@ -206,29 +237,70 @@ def export_table(
         
         print(f"   Compressed: {parquet_info['size_mb']:.2f} MB")
         
-        # Encrypt file
-        print(f"   🔐 Encrypting...")
+        # Compute content hash for change detection
+        content_hash = comparator.compute_file_hash(parquet_file)
         
-        encryption_info = encryptor.encrypt_file(
-            parquet_file,
+        # Check if we need to write this file
+        should_write, reason = comparator.should_write_file(
+            content_hash,
             encrypted_file,
             password
         )
         
-        print(f"   Encrypted: {encryption_info['encrypted_size'] / (1024*1024):.2f} MB")
+        # Update statistics
+        stats.total_chunks += 1
+        
+        if should_write:
+            # File needs to be written (new or changed)
+            if reason == "new_file":
+                stats.chunks_new += 1
+                print(f"   📝 New file - encrypting...")
+            elif reason == "content_changed":
+                stats.chunks_changed += 1
+                print(f"   🔄 Content changed - encrypting...")
+            else:  # decryption_failed
+                stats.chunks_changed += 1
+                print(f"   ⚠️  Existing file corrupted - re-encrypting...")
+            
+            # Encrypt file
+            encryption_info = encryptor.encrypt_file(
+                parquet_file,
+                encrypted_file,
+                password
+            )
+            
+            print(f"   Encrypted: {encryption_info['encrypted_size'] / (1024*1024):.2f} MB")
+            
+            # Store chunk metadata from new file
+            chunk_metadata = {
+                "chunk_number": chunk_num,
+                "file": encrypted_file.name,
+                "rows": len(df_chunk),
+                "size_bytes": encryption_info['encrypted_size'],
+                "checksum_sha256": encryption_info['checksum_sha256'],
+                "encrypted": True
+            }
+        else:
+            # File unchanged - skip write
+            stats.chunks_unchanged += 1
+            print(f"   ✅ Content unchanged - skipping write")
+            
+            # Read existing file metadata
+            existing_size = encrypted_file.stat().st_size
+            
+            # Store chunk metadata from existing file
+            chunk_metadata = {
+                "chunk_number": chunk_num,
+                "file": encrypted_file.name,
+                "rows": len(df_chunk),
+                "size_bytes": existing_size,
+                "checksum_sha256": content_hash,  # Use content hash
+                "encrypted": True
+            }
         
         # Remove unencrypted Parquet file
         parquet_file.unlink()
         
-        # Store chunk metadata
-        chunk_metadata = {
-            "chunk_number": chunk_num,
-            "file": encrypted_file.name,
-            "rows": len(df_chunk),
-            "size_bytes": encryption_info['encrypted_size'],
-            "checksum_sha256": encryption_info['checksum_sha256'],
-            "encrypted": True
-        }
         chunks_metadata.append(chunk_metadata)
         
         # Store file mapping if obfuscated
@@ -268,34 +340,82 @@ def export_table(
     if use_obfuscation:
         manifest["file_mappings"] = file_mappings
     
+    # Compute manifest content hash for change detection
+    manifest_json = json.dumps(manifest, indent=2, sort_keys=True)
+    manifest_hash = hashlib.sha256(manifest_json.encode('utf-8')).hexdigest()
+    
     # Save manifest (encrypted if obfuscation enabled, plain if not)
     manifest_file_id = None
+    manifest_needs_write = True
+    
     if use_obfuscation:
-        # Generate random manifest file ID
+        # Generate deterministic manifest file ID
         manifest_file_id = obfuscator.generate_manifest_id(table_name)
-        
-        # Save as temporary JSON
-        temp_manifest = export_dir / "manifest.json.tmp"
-        with open(temp_manifest, 'w') as f:
-            json.dump(manifest, f, indent=2)
-        
-        # Encrypt manifest
         manifest_file = export_dir / f"{manifest_file_id}.enc"
-        print(f"\n🔐 Encrypting manifest as {manifest_file.name}...")
         
-        encryptor.encrypt_file(temp_manifest, manifest_file, password)
+        # Check if manifest exists and compare
+        if manifest_file.exists():
+            existing_manifest_hash = comparator.decrypt_and_hash(manifest_file, password)
+            if existing_manifest_hash:
+                # Create temp file to compute hash of new manifest
+                temp_manifest = export_dir / "manifest.json.tmp"
+                with open(temp_manifest, 'w') as f:
+                    f.write(manifest_json)
+                
+                new_manifest_hash = comparator.compute_file_hash(temp_manifest)
+                temp_manifest.unlink()
+                
+                if new_manifest_hash == existing_manifest_hash:
+                    manifest_needs_write = False
+                    print(f"\n✅ Manifest unchanged - skipping write")
+                    logger.info("Manifest content unchanged - skipping write")
         
-        # Remove temporary file
-        temp_manifest.unlink()
-        
-        logger.info(f"Manifest encrypted: {manifest_file}")
+        if manifest_needs_write:
+            # Save as temporary JSON
+            temp_manifest = export_dir / "manifest.json.tmp"
+            with open(temp_manifest, 'w') as f:
+                f.write(manifest_json)
+            
+            # Encrypt manifest
+            print(f"\n🔐 Encrypting manifest as {manifest_file.name}...")
+            encryptor.encrypt_file(temp_manifest, manifest_file, password)
+            
+            # Remove temporary file
+            temp_manifest.unlink()
+            
+            logger.info(f"Manifest encrypted: {manifest_file}")
     else:
-        # Save as plain JSON (backward compatibility)
+        # Plain JSON manifest (backward compatibility)
         manifest_file = export_dir / "manifest.json"
-        with open(manifest_file, 'w') as f:
-            json.dump(manifest, f, indent=2)
         
-        logger.info(f"Manifest saved: {manifest_file}")
+        # Check if manifest exists and compare
+        if manifest_file.exists():
+            try:
+                existing_hash = comparator.compute_file_hash(manifest_file)
+                # Create temp file to compute hash of new manifest
+                temp_manifest = export_dir / "manifest.json.tmp"
+                with open(temp_manifest, 'w') as f:
+                    f.write(manifest_json)
+                
+                new_hash = comparator.compute_file_hash(temp_manifest)
+                temp_manifest.unlink()
+                
+                if new_hash == existing_hash:
+                    manifest_needs_write = False
+                    print(f"\n✅ Manifest unchanged - skipping write")
+                    logger.info("Manifest content unchanged - skipping write")
+            except Exception as e:
+                logger.warning(f"Failed to compare manifest: {e}")
+                manifest_needs_write = True
+        
+        if manifest_needs_write:
+            with open(manifest_file, 'w') as f:
+                f.write(manifest_json)
+            
+            logger.info(f"Manifest saved: {manifest_file}")
+    
+    # Update statistics
+    stats.manifest_written = manifest_needs_write
     
     print("\n" + "=" * 70)
     print("✅ EXPORT COMPLETE!")
@@ -308,8 +428,21 @@ def export_table(
     if filter_clause:
         print(f"🔍 Filter applied: {filter_clause}")
     
+    # Display change detection statistics
+    print(f"\n📈 Change Detection Statistics:")
+    print(f"   Total chunks: {stats.total_chunks}")
+    print(f"   New files: {stats.chunks_new}")
+    print(f"   Changed files: {stats.chunks_changed}")
+    print(f"   Unchanged files: {stats.chunks_unchanged}")
+    print(f"   Files written: {stats.chunks_written}")
+    print(f"   Unchanged: {stats.unchanged_percentage:.1f}%")
+    if stats.manifest_written:
+        print(f"   Manifest: Written")
+    else:
+        print(f"   Manifest: Unchanged (skipped)")
+    
     total_size = sum(c['size_bytes'] for c in chunks_metadata)
-    print(f"💾 Size: {total_size / (1024*1024):.2f} MB (encrypted)")
+    print(f"\n💾 Size: {total_size / (1024*1024):.2f} MB (encrypted)")
     print(f"🔐 Encryption: AES-256-GCM with PBKDF2 ({encryptor.iterations:,} iterations)")
     if use_obfuscation:
         print(f"🔒 Names: Obfuscated (all files encrypted)")
