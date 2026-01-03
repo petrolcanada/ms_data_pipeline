@@ -33,7 +33,8 @@ class MetadataComparator:
             
         Returns:
             {
-                "changed": True/False,
+                "has_changes": True/False,
+                "changed": True/False,  # Alias for has_changes
                 "changes": [
                     {"type": "column_added", "column": "NEW_COL", "details": {...}},
                     ...
@@ -61,8 +62,11 @@ class MetadataComparator:
         # Generate summary
         summary = self._generate_summary()
         
+        has_changes = len(self.changes) > 0
+        
         return {
-            "changed": len(self.changes) > 0,
+            "has_changes": has_changes,
+            "changed": has_changes,  # Alias for backward compatibility
             "changes": self.changes,
             "summary": summary
         }
