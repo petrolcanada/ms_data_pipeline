@@ -16,10 +16,6 @@ tables:
     postgres:
       schema: "ms"
       table: "FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND"
-    sync_mode: "full"
-    schedule: "daily"
-    encryption: true
-    compression: true
     # Optional: Customize for this specific table
     # export:
     #   chunk_size: 50000         # Smaller chunks for this table
@@ -42,10 +38,6 @@ tables:
     postgres:
       schema: "ms"
       table: "FUND_ATTRIBUTES_CA_OPENEND"
-    sync_mode: "full"
-    schedule: "daily"
-    encryption: true
-    compression: true
     # Optional: Customize for this specific table
     # export:
     #   chunk_size: 50000         # Smaller chunks for this table
@@ -65,10 +57,6 @@ tables:
     postgres:
       schema: "ms"
       table: "MONTH_END_TRAILING_TOTAL_RETURNS_CA_OPENEND"
-    sync_mode: "full"
-    schedule: "daily"
-    encryption: true
-    compression: true
     # Optional: Customize for this specific table
     # export:
     #   chunk_size: 50000         # Smaller chunks for this table
