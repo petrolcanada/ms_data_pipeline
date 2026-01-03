@@ -60,6 +60,18 @@ class PostgreSQLDataLoader:
             total_rows = len(df)
             logger.info(f"  Rows: {total_rows:,}")
             
+            # Convert column names to lowercase to match PostgreSQL convention
+            # PostgreSQL stores unquoted identifiers as lowercase
+            df.columns = [col.lower() for col in df.columns]
+            
+            # Handle NaN values - replace with None (NULL in PostgreSQL)
+            # This is critical for JSONB columns which don't accept NaN
+            import numpy as np
+            
+            # Use where() to replace NaN with None across all columns
+            # This works better than replace() for object dtype columns
+            df = df.where(pd.notnull(df), None)
+            
             # Get column names from DataFrame
             columns = df.columns.tolist()
             
@@ -73,7 +85,28 @@ class PostgreSQLDataLoader:
             logger.debug(f"Insert SQL: {insert_sql}")
             
             # Convert DataFrame to list of tuples
-            data = [tuple(row) for row in df.values]
+            # Handle NaN values at conversion time to ensure they become None
+            import math
+            
+            def clean_value(val):
+                """Convert NaN and other problematic values to None"""
+                if val is None:
+                    return None
+                # Check for float NaN
+                if isinstance(val, float) and math.isnan(val):
+                    return None
+                # Check for numpy NaN
+                if pd.isna(val):
+                    return None
+                return val
+            
+            # Apply cleaning to each row
+            data = []
+            for _, row in df.iterrows():
+                cleaned_row = tuple(clean_value(val) for val in row)
+                data.append(cleaned_row)
+            
+            logger.info(f"  Cleaned {len(data):,} rows (NaN → NULL)")
             
             # Batch insert
             logger.info(f"Loading to {schema}.{table}")

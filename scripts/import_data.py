@@ -18,10 +18,12 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
 
 from pipeline.transformers.encryptor import FileEncryptor
+from pipeline.transformers.obfuscator import DataObfuscator
 from pipeline.loaders.data_loader import PostgreSQLDataLoader
 from pipeline.config.settings import get_settings
 from pipeline.utils.logger import get_logger
 import yaml
+import tempfile
 
 logger = get_logger(__name__)
 
@@ -77,21 +79,101 @@ def import_table(
     print(f"IMPORTING TABLE: {table_name}")
     print("=" * 70)
     
-    # Import directory
-    import_dir = Path(import_base_dir) / table_name
+    # Try to find import directory (obfuscated or not)
+    import_base_path = Path(import_base_dir)
+    import_dir = None
+    obfuscated = False
     
-    if not import_dir.exists():
-        raise FileNotFoundError(f"Import directory not found: {import_dir}")
+    # First, try human-readable folder name
+    candidate_dir = import_base_path / table_name
+    if candidate_dir.exists():
+        import_dir = candidate_dir
+        print(f"📁 Found folder: {table_name} (non-obfuscated)")
+    else:
+        # Try obfuscated folder ID
+        obfuscator = DataObfuscator()
+        folder_id = obfuscator.generate_folder_id(table_name)
+        candidate_dir = import_base_path / folder_id
+        
+        if candidate_dir.exists():
+            import_dir = candidate_dir
+            obfuscated = True
+            print(f"🔒 Found obfuscated folder: {folder_id}")
+            print(f"   (Deterministic folder ID for {table_name})")
+        else:
+            raise FileNotFoundError(
+                f"Import directory not found for table: {table_name}\n"
+                f"   Tried: {import_base_path / table_name}\n"
+                f"   Tried: {import_base_path / folder_id}\n"
+                f"   Make sure data is transferred to the import directory"
+            )
     
     logger.info(f"Import directory: {import_dir}")
     
-    # Read manifest
+    # Read manifest (might be encrypted if obfuscated)
+    manifest = None
     manifest_file = import_dir / "manifest.json"
-    if not manifest_file.exists():
-        raise FileNotFoundError(f"Manifest file not found: {manifest_file}")
     
-    with open(manifest_file, 'r') as f:
-        manifest = json.load(f)
+    if manifest_file.exists():
+        # Plain manifest
+        print(f"📋 Reading manifest: manifest.json")
+        with open(manifest_file, 'r') as f:
+            manifest = json.load(f)
+    else:
+        # Look for encrypted manifest
+        if obfuscated:
+            print(f"🔒 Manifest is encrypted, searching for encrypted manifest...")
+            
+            # Find any .enc file that might be the manifest
+            enc_files = list(import_dir.glob("*.enc"))
+            
+            # Try to decrypt each .enc file to find the manifest
+            # The manifest should be the smallest file or have specific content
+            manifest_found = False
+            
+            for enc_file in enc_files:
+                # Skip data chunk files (they're larger)
+                if enc_file.stat().st_size > 1024 * 1024:  # Skip files > 1MB
+                    continue
+                
+                try:
+                    print(f"   Trying to decrypt: {enc_file.name}")
+                    
+                    # Decrypt to temporary file
+                    with tempfile.NamedTemporaryFile(mode='w+', suffix='.json', delete=False) as temp_file:
+                        temp_path = Path(temp_file.name)
+                    
+                    encryptor = FileEncryptor()
+                    encryptor.decrypt_file(enc_file, temp_path, password)
+                    
+                    # Try to read as JSON
+                    with open(temp_path, 'r') as f:
+                        content = json.load(f)
+                    
+                    # Check if it's a manifest (has table_name field)
+                    if 'table_name' in content and content['table_name'] == table_name:
+                        manifest = content
+                        manifest_found = True
+                        print(f"   ✅ Found and decrypted manifest: {enc_file.name}")
+                        temp_path.unlink()  # Clean up temp file
+                        break
+                    
+                    temp_path.unlink()  # Clean up temp file
+                    
+                except Exception as e:
+                    # Not the manifest or wrong password
+                    if temp_path.exists():
+                        temp_path.unlink()
+                    continue
+            
+            if not manifest_found:
+                raise FileNotFoundError(
+                    f"Encrypted manifest not found for table: {table_name}\n"
+                    f"   Searched in: {import_dir}\n"
+                    f"   Make sure the manifest file is transferred"
+                )
+        else:
+            raise FileNotFoundError(f"Manifest file not found: {manifest_file}")
     
     print(f"\n📋 Manifest loaded:")
     print(f"   Export date: {manifest['export_timestamp']}")
