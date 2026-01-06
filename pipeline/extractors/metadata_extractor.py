@@ -282,8 +282,8 @@ class SnowflakeMetadataExtractor:
         """
         Check for changes when obfuscation is enabled
         
-        Decrypts the previous metadata file, compares with new metadata,
-        then returns comparison results.
+        Decrypts the previous metadata file IN MEMORY (not to disk),
+        compares with new metadata, then returns comparison results.
         
         Args:
             table_name: Name of the table
@@ -302,21 +302,16 @@ class SnowflakeMetadataExtractor:
             return None
         
         try:
-            # Decrypt to temporary file
-            temp_json = self.metadata_dir / f"{file_id}_temp.json"
-            self.obfuscator.encryptor.decrypt_file(encrypted_file, temp_json, password)
+            # Decrypt to MEMORY (not disk)
+            decrypted_bytes = self.obfuscator.encryptor.decrypt_to_memory(encrypted_file, password)
             
-            # Load decrypted metadata
-            with open(temp_json, 'r') as f:
-                old_metadata = json.load(f)
+            # Parse JSON from memory
+            old_metadata = json.loads(decrypted_bytes.decode('utf-8'))
             
-            # Remove temporary file
-            temp_json.unlink()
-            
-            # Compare metadata
+            # Compare metadata (all in memory)
             comparison = self.comparator.compare_metadata(old_metadata, new_metadata)
             
-            if comparison["changed"]:
+            if comparison["has_changes"]:
                 logger.warning(f"⚠️  Metadata changes detected for {table_name}")
                 logger.warning(f"   {comparison['summary']}")
             else:
@@ -360,38 +355,79 @@ class SnowflakeMetadataExtractor:
     
     def archive_old_metadata_obfuscated(
         self,
-        table_name: str
+        table_name: str,
+        password: str
     ) -> Tuple[Optional[Path], Optional[Path]]:
         """
-        Archive obfuscated metadata files with timestamp
+        Archive obfuscated metadata files with timestamped filenames
+        
+        Process:
+        1. Decrypt existing encrypted files to memory
+        2. Create timestamped raw filenames (table_YYYYMMDD_metadata.json)
+        3. Encrypt with new deterministic IDs based on timestamped names
+        4. Delete old encrypted files
         
         Args:
             table_name: Name of the table
+            password: Encryption password
             
         Returns:
             Tuple of (archived_metadata_path, archived_ddl_path)
         """
         date_str = datetime.now().strftime("%Y%m%d")
         
-        # Get file IDs for this table
-        metadata_file_id = self.obfuscator.generate_metadata_file_id(table_name, "metadata")
-        ddl_file_id = self.obfuscator.generate_metadata_file_id(table_name, "ddl")
+        # Get current file IDs (without timestamp)
+        current_metadata_id = self.obfuscator.generate_metadata_file_id(table_name, "metadata")
+        current_ddl_id = self.obfuscator.generate_metadata_file_id(table_name, "ddl")
+        
+        # Get archived file IDs (with timestamp)
+        archived_metadata_id = self.obfuscator.generate_metadata_file_id(table_name, "metadata", date_str)
+        archived_ddl_id = self.obfuscator.generate_metadata_file_id(table_name, "ddl", date_str)
+        
+        archived_metadata = None
+        archived_ddl = None
         
         # Archive metadata file
-        metadata_file = self.metadata_dir / f"{metadata_file_id}.enc"
-        archived_metadata = None
-        if metadata_file.exists():
-            archived_metadata = self.metadata_dir / f"{metadata_file_id}_{date_str}.enc"
-            metadata_file.rename(archived_metadata)
-            logger.info(f"Archived obfuscated metadata to {archived_metadata}")
+        current_metadata_file = self.metadata_dir / f"{current_metadata_id}.enc"
+        if current_metadata_file.exists():
+            try:
+                # Decrypt to memory
+                decrypted_bytes = self.obfuscator.encryptor.decrypt_to_memory(current_metadata_file, password)
+                
+                # Encrypt with new timestamped ID
+                archived_metadata = self.metadata_dir / f"{archived_metadata_id}.enc"
+                self.obfuscator.encryptor.encrypt_from_memory(decrypted_bytes, archived_metadata, password)
+                
+                # Delete old encrypted file
+                current_metadata_file.unlink()
+                
+                logger.info(f"Archived metadata: {current_metadata_id}.enc → {archived_metadata_id}.enc")
+                logger.info(f"  (Represents: {table_name}_metadata.json → {table_name}_metadata_{date_str}.json)")
+                
+            except Exception as e:
+                logger.error(f"Failed to archive metadata for {table_name}: {e}")
+                archived_metadata = None
         
         # Archive DDL file
-        ddl_file = self.ddl_dir / f"{ddl_file_id}.enc"
-        archived_ddl = None
-        if ddl_file.exists():
-            archived_ddl = self.ddl_dir / f"{ddl_file_id}_{date_str}.enc"
-            ddl_file.rename(archived_ddl)
-            logger.info(f"Archived obfuscated DDL to {archived_ddl}")
+        current_ddl_file = self.ddl_dir / f"{current_ddl_id}.enc"
+        if current_ddl_file.exists():
+            try:
+                # Decrypt to memory
+                decrypted_bytes = self.obfuscator.encryptor.decrypt_to_memory(current_ddl_file, password)
+                
+                # Encrypt with new timestamped ID
+                archived_ddl = self.ddl_dir / f"{archived_ddl_id}.enc"
+                self.obfuscator.encryptor.encrypt_from_memory(decrypted_bytes, archived_ddl, password)
+                
+                # Delete old encrypted file
+                current_ddl_file.unlink()
+                
+                logger.info(f"Archived DDL: {current_ddl_id}.enc → {archived_ddl_id}.enc")
+                logger.info(f"  (Represents: {table_name}_create.sql → {table_name}_create_{date_str}.sql)")
+                
+            except Exception as e:
+                logger.error(f"Failed to archive DDL for {table_name}: {e}")
+                archived_ddl = None
         
         return archived_metadata, archived_ddl
     
@@ -438,7 +474,7 @@ class SnowflakeMetadataExtractor:
             elif comparison.get("changed"):
                 # Archive old files before saving new ones
                 if self.obfuscator:
-                    archived_metadata, archived_ddl = self.archive_old_metadata_obfuscated(table_name)
+                    archived_metadata, archived_ddl = self.archive_old_metadata_obfuscated(table_name, password)
                 else:
                     archived_metadata, archived_ddl = self.archive_old_metadata(table_name)
                 

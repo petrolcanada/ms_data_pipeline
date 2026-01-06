@@ -156,6 +156,90 @@ class FileEncryptor:
                 logger.error("Decryption failed - wrong password or corrupted file")
             raise
     
+    def decrypt_to_memory(self, input_path: Path, password: str) -> bytes:
+        """
+        Decrypt a file directly to memory without writing to disk
+        
+        Args:
+            input_path: Path to encrypted file
+            password: Decryption password
+            
+        Returns:
+            Decrypted bytes in memory
+        """
+        try:
+            # Read encrypted file
+            with open(input_path, 'rb') as f:
+                # Read salt (16 bytes)
+                salt = f.read(16)
+                # Read nonce (12 bytes)
+                nonce = f.read(12)
+                # Read ciphertext (rest of file)
+                ciphertext = f.read()
+            
+            # Derive key from password
+            key = self.derive_key(password, salt)
+            
+            # Decrypt using AES-GCM
+            aesgcm = AESGCM(key)
+            plaintext = aesgcm.decrypt(nonce, ciphertext, None)
+            
+            logger.debug(f"Decrypted {input_path.name} to memory ({len(plaintext):,} bytes)")
+            
+            return plaintext
+            
+        except Exception as e:
+            logger.error(f"Failed to decrypt {input_path} to memory: {e}")
+            if "authentication" in str(e).lower():
+                logger.error("Decryption failed - wrong password or corrupted file")
+            raise
+    
+    def encrypt_from_memory(self, data: bytes, output_path: Path, password: str) -> dict:
+        """
+        Encrypt data from memory to file
+        
+        Args:
+            data: Bytes to encrypt
+            output_path: Path to output encrypted file
+            password: Encryption password
+            
+        Returns:
+            Dictionary with encryption metadata
+        """
+        try:
+            # Generate salt
+            salt = self.generate_salt()
+            
+            # Derive key from password
+            key = self.derive_key(password, salt)
+            
+            # Calculate checksum of original data
+            checksum = hashlib.sha256(data).hexdigest()
+            
+            # Encrypt using AES-GCM
+            aesgcm = AESGCM(key)
+            nonce = os.urandom(12)  # 96-bit nonce for GCM
+            ciphertext = aesgcm.encrypt(nonce, data, None)
+            
+            # Write encrypted file: salt + nonce + ciphertext
+            with open(output_path, 'wb') as f:
+                f.write(salt)
+                f.write(nonce)
+                f.write(ciphertext)
+            
+            logger.debug(f"Encrypted {len(data):,} bytes from memory -> {output_path.name}")
+            
+            return {
+                "salt": base64.b64encode(salt).decode('utf-8'),
+                "checksum_sha256": checksum,
+                "original_size": len(data),
+                "encrypted_size": len(salt) + len(nonce) + len(ciphertext)
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to encrypt to {output_path}: {e}")
+            raise
+    
     def verify_checksum(self, file_path: Path, expected_checksum: str) -> bool:
         """
         Verify file checksum

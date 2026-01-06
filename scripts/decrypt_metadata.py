@@ -157,11 +157,15 @@ Examples:
 
 
 def list_tables(decryptor: MetadataDecryptor, password: str):
-    """List available tables in master index"""
-    logger.info("Listing available tables...")
+    """List available tables from config/tables.yaml"""
+    logger.info("Listing available tables from config/tables.yaml...")
     
     try:
-        tables = decryptor.list_available_tables(password)
+        import yaml
+        with open("config/tables.yaml", 'r') as f:
+            config = yaml.safe_load(f)
+        
+        tables = [t['name'] for t in config['tables']]
         
         print("\n" + "=" * 80)
         print("AVAILABLE TABLES")
@@ -179,11 +183,28 @@ def list_tables(decryptor: MetadataDecryptor, password: str):
 
 
 def decrypt_all_tables(decryptor: MetadataDecryptor, password: str, show_changes: bool = False):
-    """Decrypt all tables from master index"""
-    logger.info("Decrypting all tables...")
+    """Decrypt all tables from config/tables.yaml"""
+    logger.info("Decrypting all tables from config/tables.yaml...")
     
     try:
-        results = decryptor.decrypt_all_tables(password)
+        import yaml
+        with open("config/tables.yaml", 'r') as f:
+            config = yaml.safe_load(f)
+        
+        tables = [t['name'] for t in config['tables']]
+        results = {}
+        
+        for table_name in tables:
+            try:
+                result = decryptor.decrypt_table(table_name, password)
+                results[table_name] = result
+            except Exception as e:
+                logger.error(f"Failed to decrypt {table_name}: {e}")
+                results[table_name] = {
+                    "table_name": table_name,
+                    "status": "error",
+                    "error": str(e)
+                }
         
         # Display summary
         print("\n" + "=" * 80)
@@ -202,6 +223,8 @@ def decrypt_all_tables(decryptor: MetadataDecryptor, password: str, show_changes
                 print(f"   DDL: {result['decrypted_files']['ddl']}")
                 if result.get('has_change_log'):
                     print(f"   Changes: {result['decrypted_files']['changes']}")
+                if result.get('archived_count', 0) > 0:
+                    print(f"   Archived versions: {result['archived_count']}")
                 print(f"   Columns: {result['metadata_summary']['columns']}")
                 print()
             else:

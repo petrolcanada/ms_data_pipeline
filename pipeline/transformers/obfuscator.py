@@ -100,7 +100,10 @@ class DataObfuscator:
     
     def generate_file_id(self, chunk_number: int) -> str:
         """
-        Generate obfuscated file identifier for a chunk
+        Generate obfuscated file identifier for a chunk (DEPRECATED - use generate_chunk_file_id)
+        
+        This method generates random IDs and is kept for backward compatibility.
+        New code should use generate_chunk_file_id() for deterministic IDs.
         
         Args:
             chunk_number: Chunk number (for logging only)
@@ -109,7 +112,27 @@ class DataObfuscator:
             Random file identifier
         """
         file_id = self.generate_identifier()
-        logger.debug(f"Generated file ID for chunk {chunk_number}: {file_id}")
+        logger.debug(f"Generated random file ID for chunk {chunk_number}: {file_id}")
+        return file_id
+    
+    def generate_chunk_file_id(self, table_name: str, chunk_number: int) -> str:
+        """
+        Generate deterministic obfuscated file identifier for a data chunk
+        
+        Uses deterministic generation so the same table and chunk number
+        always produce the same file ID across multiple runs.
+        
+        Args:
+            table_name: Original table name
+            chunk_number: Chunk number (1-indexed)
+            
+        Returns:
+            Deterministic file identifier
+        """
+        # Create deterministic ID from table name and chunk number
+        key = f"{table_name}:chunk:{chunk_number}"
+        file_id = self.generate_deterministic_identifier(key, "data")
+        logger.debug(f"Generated deterministic chunk file ID for '{table_name}' chunk {chunk_number}: {file_id}")
         return file_id
     
     def generate_manifest_id(self, table_name: str) -> str:
@@ -272,7 +295,7 @@ class MetadataObfuscator(DataObfuscator):
     Extends DataObfuscator with metadata-specific functionality
     """
     
-    def generate_metadata_file_id(self, table_name: str, file_type: str) -> str:
+    def generate_metadata_file_id(self, table_name: str, file_type: str, timestamp: str = None) -> str:
         """
         Generate deterministic obfuscated file identifier for metadata
         
@@ -281,13 +304,26 @@ class MetadataObfuscator(DataObfuscator):
         
         Args:
             table_name: Original table name
-            file_type: Type of file ('metadata' or 'ddl')
+            file_type: Type of file ('metadata', 'ddl', or 'changes')
+            timestamp: Optional timestamp (YYYYMMDD format) for archived files
             
         Returns:
             Deterministic file identifier
         """
-        file_id = self.generate_deterministic_identifier(table_name, file_type)
-        logger.info(f"Generated {file_type} file ID for table '{table_name}': {file_id}")
+        # If timestamp provided, include it in the key for archived files
+        # Format: table_name:file_type:timestamp for archived files
+        if timestamp:
+            key = f"{table_name}:{file_type}:{timestamp}"
+        else:
+            key = table_name
+        
+        file_id = self.generate_deterministic_identifier(key, file_type if not timestamp else "")
+        
+        if timestamp:
+            logger.debug(f"Generated {file_type} file ID for table '{table_name}' with timestamp {timestamp}: {file_id}")
+        else:
+            logger.info(f"Generated {file_type} file ID for table '{table_name}': {file_id}")
+        
         return file_id
     
     def create_metadata_master_index(

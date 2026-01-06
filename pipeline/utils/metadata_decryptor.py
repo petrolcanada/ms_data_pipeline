@@ -52,117 +52,98 @@ class MetadataDecryptor:
         self.encryptor = FileEncryptor()
         self.obfuscator = MetadataObfuscator()
     
-    def decrypt_master_index(self, password: str) -> Dict:
-        """
-        Decrypt and return master index
-        
-        Args:
-            password: Decryption password
-            
-        Returns:
-            Master index dictionary
-            
-        Raises:
-            FileNotFoundError: If master index doesn't exist
-            ValueError: If decryption fails (wrong password or corrupted file)
-        """
-        if not self.encrypted_index_file.exists():
-            raise FileNotFoundError(
-                f"Master index not found at {self.encrypted_index_file}. "
-                "Run metadata extraction with obfuscation enabled first."
-            )
-        
-        try:
-            logger.info(f"Decrypting master index from {self.encrypted_index_file}")
-            master_index = self.obfuscator.decrypt_master_index(
-                self.encrypted_index_file,
-                password
-            )
-            logger.info(f"✅ Master index decrypted successfully")
-            logger.info(f"   Tables: {len(master_index.get('tables', []))}")
-            return master_index
-            
-        except Exception as e:
-            if "authentication" in str(e).lower() or "decrypt" in str(e).lower():
-                raise ValueError(
-                    "Failed to decrypt master index. "
-                    "Incorrect password or corrupted file."
-                ) from e
-            raise
-    
     def decrypt_table(
         self,
         table_name: str,
         password: str
     ) -> Dict[str, Any]:
         """
-        Decrypt metadata and DDL for a specific table
+        Decrypt metadata and DDL for a specific table (without needing index.enc)
+        
+        Uses deterministic file IDs generated from table name to find files.
+        Restores original timestamped filenames for archived versions.
         
         Args:
-            table_name: Name of the table to decrypt
+            table_name: Name of the table
             password: Decryption password
             
         Returns:
             Dictionary with decryption results
-            
-        Raises:
-            FileNotFoundError: If master index doesn't exist
-            ValueError: If table not found or decryption fails
         """
-        # Decrypt master index to find file IDs
-        master_index = self.decrypt_master_index(password)
-        
-        # Find table in master index
-        table_entry = None
-        for entry in master_index.get('tables', []):
-            if entry.get('table_name') == table_name:
-                table_entry = entry
-                break
-        
-        if not table_entry:
-            available_tables = [e.get('table_name') for e in master_index.get('tables', [])]
-            raise ValueError(
-                f"Table '{table_name}' not found in master index. "
-                f"Available tables: {', '.join(available_tables)}"
-            )
-        
-        # Get file IDs
-        metadata_file_id = table_entry.get('metadata_file_id')
-        ddl_file_id = table_entry.get('ddl_file_id')
-        
-        if not metadata_file_id or not ddl_file_id:
-            raise ValueError(f"Invalid table entry for '{table_name}' - missing file IDs")
-        
         # Ensure decrypted directories exist
         self._ensure_decrypted_directories()
         
-        # Decrypt metadata file
+        # Generate current file IDs (without timestamp)
+        metadata_file_id = self.obfuscator.generate_metadata_file_id(table_name, "metadata")
+        ddl_file_id = self.obfuscator.generate_metadata_file_id(table_name, "ddl")
+        
+        # Decrypt current metadata file
         encrypted_metadata_file = self.encrypted_schemas_dir / f"{metadata_file_id}.enc"
         decrypted_metadata_file = self.decrypted_schemas_dir / f"{table_name}_metadata.json"
         
         if not encrypted_metadata_file.exists():
             raise FileNotFoundError(f"Encrypted metadata file not found: {encrypted_metadata_file}")
         
-        logger.info(f"Decrypting metadata for {table_name}...")
+        logger.info(f"Decrypting current metadata for {table_name}...")
         self.encryptor.decrypt_file(
             encrypted_metadata_file,
             decrypted_metadata_file,
             password
         )
         
-        # Decrypt DDL file
+        # Decrypt current DDL file
         encrypted_ddl_file = self.encrypted_ddl_dir / f"{ddl_file_id}.enc"
         decrypted_ddl_file = self.decrypted_ddl_dir / f"{table_name}_create.sql"
         
         if not encrypted_ddl_file.exists():
             raise FileNotFoundError(f"Encrypted DDL file not found: {encrypted_ddl_file}")
         
-        logger.info(f"Decrypting DDL for {table_name}...")
+        logger.info(f"Decrypting current DDL for {table_name}...")
         self.encryptor.decrypt_file(
             encrypted_ddl_file,
             decrypted_ddl_file,
             password
         )
+        
+        # Find and decrypt archived versions (files with timestamps)
+        archived_count = 0
+        
+        # Find archived metadata files (pattern: {base_id}_*.enc where * is not just numbers)
+        for encrypted_file in self.encrypted_schemas_dir.glob("*.enc"):
+            filename = encrypted_file.stem  # Remove .enc extension
+            
+            # Check if this is an archived version of our table
+            # Archived files have format: {hash}_{timestamp} where hash matches our base ID
+            if filename.startswith(metadata_file_id) and len(filename) > len(metadata_file_id):
+                # Extract timestamp from filename
+                suffix = filename[len(metadata_file_id):]
+                if suffix.startswith('_') and len(suffix) == 9:  # _YYYYMMDD
+                    timestamp = suffix[1:]  # Remove leading underscore
+                    
+                    # Verify this is the correct archived file by regenerating its ID
+                    expected_id = self.obfuscator.generate_metadata_file_id(table_name, "metadata", timestamp)
+                    if filename == expected_id:
+                        # Decrypt to timestamped filename
+                        decrypted_archived = self.decrypted_schemas_dir / f"{table_name}_metadata_{timestamp}.json"
+                        logger.info(f"Decrypting archived metadata: {table_name}_metadata_{timestamp}.json")
+                        self.encryptor.decrypt_file(encrypted_file, decrypted_archived, password)
+                        archived_count += 1
+        
+        # Find and decrypt archived DDL files
+        for encrypted_file in self.encrypted_ddl_dir.glob("*.enc"):
+            filename = encrypted_file.stem
+            
+            if filename.startswith(ddl_file_id) and len(filename) > len(ddl_file_id):
+                suffix = filename[len(ddl_file_id):]
+                if suffix.startswith('_') and len(suffix) == 9:
+                    timestamp = suffix[1:]
+                    
+                    expected_id = self.obfuscator.generate_metadata_file_id(table_name, "ddl", timestamp)
+                    if filename == expected_id:
+                        decrypted_archived = self.decrypted_ddl_dir / f"{table_name}_create_{timestamp}.sql"
+                        logger.info(f"Decrypting archived DDL: {table_name}_create_{timestamp}.sql")
+                        self.encryptor.decrypt_file(encrypted_file, decrypted_archived, password)
+                        archived_count += 1
         
         # Decrypt change log file if it exists
         changes_file_id = self.obfuscator.generate_metadata_file_id(table_name, "changes")
@@ -196,7 +177,8 @@ class MetadataDecryptor:
                 "row_count": metadata.get('statistics', {}).get('row_count', 0),
                 "last_altered": metadata.get('statistics', {}).get('last_altered')
             },
-            "has_change_log": has_changes
+            "has_change_log": has_changes,
+            "archived_count": archived_count
         }
         
         logger.info(f"✅ Decrypted {table_name}")
@@ -204,70 +186,24 @@ class MetadataDecryptor:
         logger.info(f"   DDL: {decrypted_ddl_file}")
         if has_changes:
             logger.info(f"   Changes: {decrypted_changes_file}")
+        if archived_count > 0:
+            logger.info(f"   Archived versions: {archived_count}")
         logger.info(f"   Columns: {result['metadata_summary']['columns']}")
         
         return result
     
-    def decrypt_all_tables(self, password: str) -> Dict[str, Any]:
+    def list_available_tables(self) -> List[str]:
         """
-        Decrypt all tables from master index
+        List all tables from config/tables.yaml
         
-        Args:
-            password: Decryption password
-            
-        Returns:
-            Dictionary with decryption results for each table
-        """
-        # Decrypt master index
-        master_index = self.decrypt_master_index(password)
-        
-        # Save decrypted master index
-        self._ensure_decrypted_directories()
-        with open(self.decrypted_index_file, 'w') as f:
-            json.dump(master_index, f, indent=2)
-        logger.info(f"Saved decrypted master index to {self.decrypted_index_file}")
-        
-        # Decrypt each table
-        results = {}
-        tables = master_index.get('tables', [])
-        
-        logger.info(f"Decrypting {len(tables)} table(s)...")
-        
-        for table_entry in tables:
-            table_name = table_entry.get('table_name')
-            
-            try:
-                result = self.decrypt_table(table_name, password)
-                results[table_name] = result
-                
-            except Exception as e:
-                logger.error(f"Failed to decrypt {table_name}: {e}")
-                results[table_name] = {
-                    "table_name": table_name,
-                    "status": "error",
-                    "error": str(e)
-                }
-        
-        # Summary
-        success_count = sum(1 for r in results.values() if r.get('status') == 'success')
-        error_count = len(results) - success_count
-        
-        logger.info(f"✅ Decryption complete: {success_count} succeeded, {error_count} failed")
-        
-        return results
-    
-    def list_available_tables(self, password: str) -> List[str]:
-        """
-        List all tables in the master index
-        
-        Args:
-            password: Decryption password
-            
         Returns:
             List of table names
         """
-        master_index = self.decrypt_master_index(password)
-        tables = [entry.get('table_name') for entry in master_index.get('tables', [])]
+        import yaml
+        with open("config/tables.yaml", 'r') as f:
+            config = yaml.safe_load(f)
+        
+        tables = [t['name'] for t in config['tables']]
         return tables
     
     def clean_decrypted_files(self) -> Dict[str, int]:

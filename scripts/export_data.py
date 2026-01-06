@@ -202,7 +202,6 @@ def export_table(
     chunks_metadata = []
     chunk_num = 0
     total_rows = 0
-    file_mappings = {}  # Maps obfuscated file names to chunk info
     
     for df_chunk in extractor.extract_table_chunks(
         sf_config['database'],
@@ -216,7 +215,7 @@ def export_table(
         
         # Generate file name (obfuscated or original)
         if use_obfuscation:
-            file_id = obfuscator.generate_file_id(chunk_num)
+            file_id = obfuscator.generate_chunk_file_id(table_name, chunk_num)
             parquet_file = export_dir / f"{file_id}.parquet"
             encrypted_file = export_dir / f"{file_id}.enc"
         else:
@@ -302,13 +301,6 @@ def export_table(
         parquet_file.unlink()
         
         chunks_metadata.append(chunk_metadata)
-        
-        # Store file mapping if obfuscated
-        if use_obfuscation:
-            file_mappings[encrypted_file.name] = {
-                "chunk_number": chunk_num,
-                "rows": len(df_chunk)
-            }
     
     # Create manifest
     manifest = {
@@ -335,10 +327,6 @@ def export_table(
         },
         "chunks": chunks_metadata
     }
-    
-    # Add file mappings if obfuscated
-    if use_obfuscation:
-        manifest["file_mappings"] = file_mappings
     
     # Compute manifest content hash for change detection
     manifest_json = json.dumps(manifest, indent=2, sort_keys=True)
@@ -424,6 +412,7 @@ def export_table(
     if use_obfuscation:
         print(f"🔒 Folder ID: {folder_name}")
         print(f"🔒 Manifest ID: {manifest_file_id}")
+        print(f"🔒 Chunk IDs: Deterministic (same table + chunk = same ID)")
     print(f"📊 Total: {total_rows:,} rows in {chunk_num} chunks")
     if filter_clause:
         print(f"🔍 Filter applied: {filter_clause}")
@@ -530,7 +519,8 @@ def main():
             obfuscator = DataObfuscator()
             print("\n🔒 Name obfuscation: ENABLED")
             print("   Folder and file names will use deterministic IDs")
-            print("   Same table = same folder ID across runs")
+            print("   Same table + chunk = same file ID across runs")
+            print("   No data hashing needed for ID generation")
         else:
             print("\n📁 Name obfuscation: DISABLED")
             print("   Using original table names for folders")
