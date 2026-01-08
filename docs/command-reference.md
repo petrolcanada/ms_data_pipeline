@@ -1,100 +1,278 @@
 # Command Reference Guide
 
-Quick reference for all data pipeline commands.
+Quick reference for all data pipeline commands with obfuscation and change tracking.
 
 ---
 
-## **Complete 4-Step Workflow**
+## **Complete Workflow Overview**
 
-### **SNOWFLAKE SIDE (VPN)**
+### **SNOWFLAKE SIDE (VPN-connected machine)**
 
-#### **Step 1: Extract Metadata**
+1. **Extract Metadata** - Extract schemas, DDL, track changes
+2. **Export Data** - Export actual table data with encryption
+3. **View Changes** (optional) - Review metadata changes
+4. **Decrypt Metadata** (optional) - Human-readable review
+
+### **MANUAL TRANSFER**
+
+Copy encrypted files to PostgreSQL server
+
+### **POSTGRESQL SIDE (External machine)**
+
+4. **Create Tables** - Create PostgreSQL tables from metadata (one-time)
+5. **Import Data** - Decrypt and load into PostgreSQL
+
+---
+
+## **Snowflake Side Commands**
+
+### **1. Extract Metadata** (Schemas, DDL, Change Tracking)
+
 ```bash
-# Extract metadata for all tables
+# Extract metadata for all tables (obfuscation & change tracking enabled by default)
 python scripts/extract_metadata.py --all
-
-# Extract with change detection (recommended)
-python scripts/extract_metadata.py --all --check-changes
-
-# Force re-extraction even if no changes
-python scripts/extract_metadata.py --all --check-changes --force
 
 # Extract metadata for specific table
 python scripts/extract_metadata.py --table FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND
+
+# Force re-extraction even if no changes detected
+python scripts/extract_metadata.py --all --force
+
+# Disable obfuscation (not recommended)
+python scripts/extract_metadata.py --all --no-obfuscate
+
+# Disable change tracking
+python scripts/extract_metadata.py --all --no-check-changes
 ```
+
+**Features:**
+- ✅ **Obfuscation enabled by default** - File names are hashed for security
+- ✅ **Change tracking enabled by default** - Detects schema changes automatically
+- ✅ **Timestamped archives** - Old versions saved as `table_metadata_20250105.json`
+- ✅ **In-memory comparison** - No temporary files written to disk
+- ✅ **Deterministic IDs** - Same table = same file ID across runs
 
 **Options:**
 - `--all` - Extract metadata for all configured tables
-- `--check-changes` - Enable change detection and alerting
+- `--table <name>` - Extract metadata for specific table
 - `--force` - Force re-extraction even if no changes detected
-- `--create-postgres` - Also create PostgreSQL tables after extraction
-- `--drop-existing` - Drop existing PostgreSQL tables before creation
+- `--no-obfuscate` - Disable name obfuscation
+- `--no-check-changes` - Disable change detection
+- `--password-file <path>` - Read password from file (for automation)
 
-**Output:**
-- `metadata/schemas/{table_name}_metadata.json`
-- `metadata/ddl/{table_name}_create.sql`
-- `metadata/schemas/{table_name}_{YYYYMMDD}_metadata.json` (archived if changed)
-- `metadata/ddl/{table_name}_{YYYYMMDD}_create.sql` (archived if changed)
-- `metadata/changes/{table_name}_changes.log` (change history)
+**Output (Obfuscated):**
+- `metadata/schemas/1c81276c664e938a.enc` - Current metadata (encrypted)
+- `metadata/ddl/220c0c97431be221.enc` - Current DDL (encrypted)
+- `metadata/schemas/a1b2c3d4e5f6g7h8.enc` - Archived metadata (if changed)
+- `metadata/ddl/x9y8z7w6v5u4t3s2.enc` - Archived DDL (if changed)
+- `metadata/changes/2347fbb2bdc88f34.enc` - Change log (encrypted)
+
+**When decrypted, files restore to:**
+- `FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND_metadata.json` - Current
+- `FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND_create.sql` - Current
+- `FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND_metadata_20250105.json` - Archived
+- `FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND_create_20250105.sql` - Archived
 
 ---
 
-#### **Step 2: Export Data**
+### **2. Export Data** (Actual Table Data)
+
 ```bash
-# Export all tables (uses filters from config/tables.yaml)
+# Export all tables (obfuscation enabled by default)
 python scripts/export_data.py --all
 
 # Export specific table
 python scripts/export_data.py --table FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND
 
-# Export with custom chunk size
-python scripts/export_data.py --table FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND --chunk-size 50000
+# Export with custom chunk size (default: 100,000 rows)
+python scripts/export_data.py --all --chunk-size 50000
 
-# Export with password file (no prompt)
+# Clean existing export before starting (useful for re-runs)
+python scripts/export_data.py --all --clean
+
+# Disable obfuscation (not recommended)
+python scripts/export_data.py --all --no-obfuscate
+
+# Use password file (for automation)
 python scripts/export_data.py --all --password-file ~/.encryption_key
 ```
 
-**Prompts:**
-- Enter encryption password: ********
-- Confirm password: ********
+**Features:**
+- ✅ **Deterministic chunk IDs** - Same table + chunk = same file ID
+- ✅ **No data hashing for IDs** - Better performance
+- ✅ **Change detection** - Skip unchanged files automatically
+- ✅ **Obfuscated folders** - Folder names are hashed
+- ✅ **Encrypted manifest** - Metadata about chunks
+
+**Options:**
+- `--all` - Export all tables
+- `--table <name>` - Export specific table
+- `--chunk-size <number>` - Rows per chunk (default: 100,000)
+- `--no-obfuscate` - Disable name obfuscation
+- `--clean` - Delete existing export folder before starting
+- `--password-file <path>` - Read password from file
+
+**Output (Obfuscated):**
+```
+exports/
+└── 1c81276c664e938a/              ← Folder ID (deterministic from table name)
+    ├── a1b2c3d4e5f6g7h8.enc       ← Chunk 1 (deterministic from table:chunk:1)
+    ├── x9y8z7w6v5u4t3s2.enc       ← Chunk 2 (deterministic from table:chunk:2)
+    └── 220c0c97431be221.enc       ← Manifest (deterministic from table name)
+```
+
+**Password Prompt:**
+```
+Enter encryption password: ********
+Confirm password: ********
+```
+
+---
+
+### **3. View Change History** (Optional - Human Review)
+
+```bash
+# View changes for specific table (obfuscation auto-detected from .env)
+python scripts/view_change_history.py --table FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND
+
+# View last 10 changes
+python scripts/view_change_history.py --table FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND --limit 10
+
+# View changes in date range
+python scripts/view_change_history.py --table FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND --since 2025-01-01
+
+# Disable obfuscation
+python scripts/view_change_history.py --table FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND --no-obfuscate
+```
+
+**Features:**
+- ✅ **Automatic obfuscation detection** - Reads from `.env`
+- ✅ **Formatted output** - Human-readable change descriptions
+- ✅ **Date filtering** - View changes in specific time ranges
+
+**Options:**
+- `--table <name>` - Table name to view changes for
+- `--limit <number>` - Maximum number of entries to show
+- `--since <date>` - Show changes since date (YYYY-MM-DD)
+- `--no-obfuscate` - Disable obfuscation
+- `--password-file <path>` - Read password from file
+
+---
+
+### **4. Decrypt Metadata** (Optional - Human Review)
+
+```bash
+# Decrypt all tables to metadata/decrypted/ (git-ignored)
+python scripts/decrypt_metadata.py --all
+
+# Decrypt specific table
+python scripts/decrypt_metadata.py --table FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND
+
+# List available tables (reads from config/tables.yaml)
+python scripts/decrypt_metadata.py --list
+
+# Clean up decrypted files
+python scripts/decrypt_metadata.py --clean
+
+# Show change history after decrypting
+python scripts/decrypt_metadata.py --table FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND --show-changes
+```
+
+**Features:**
+- ✅ **No index.enc needed** - Reads table names from `config/tables.yaml`
+- ✅ **Deterministic file discovery** - Generates IDs from table names
+- ✅ **Restores timestamped filenames** - Archives show dates
+- ✅ **Git-ignored output** - Decrypted files not tracked
+
+**Options:**
+- `--all` - Decrypt all tables
+- `--table <name>` - Decrypt specific table
+- `--list` - List available tables
+- `--clean` - Delete all decrypted files
+- `--show-changes` - Display change history after decrypting
+- `--password-file <path>` - Read password from file
+- `--output-dir <path>` - Custom output directory (default: metadata/decrypted)
 
 **Output:**
-- `D:/snowflake_exports/{table_name}/data_chunk_*.parquet.enc`
-- `D:/snowflake_exports/{table_name}/manifest.json`
+```
+metadata/decrypted/
+├── schemas/
+│   ├── FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND_metadata.json          ← Current
+│   ├── FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND_metadata_20250105.json ← Archived
+│   └── FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND_metadata_20250102.json ← Archived
+├── ddl/
+│   ├── FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND_create.sql             ← Current
+│   ├── FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND_create_20250105.sql    ← Archived
+│   └── FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND_create_20250102.sql    ← Archived
+└── changes/
+    └── FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND_changes.log            ← Change log
+```
 
 ---
 
-### **MANUAL TRANSFER**
+## **Manual Transfer**
 
 Copy these files from Snowflake server to PostgreSQL server:
+
+```bash
+# Copy metadata folder
+scp -r metadata/ user@psql-server:/path/to/project/
+
+# Copy exports folder
+scp -r exports/ user@psql-server:/path/to/project/
+
+# Or use USB drive, network share, etc.
 ```
-metadata/                    → metadata/
-config/tables.yaml           → config/tables.yaml
-D:/snowflake_exports/        → E:/postgres_imports/
-```
+
+**What to transfer:**
+- `metadata/` - All encrypted metadata files
+- `exports/` - All encrypted data files
+- `config/tables.yaml` - Table configuration (if not already on PostgreSQL server)
 
 ---
 
-### **POSTGRESQL SIDE (External)**
+## **PostgreSQL Side Commands**
 
-#### **Step 3: Create Tables**
+### **5. Create PostgreSQL Tables** (One-time Setup)
+
 ```bash
-# Create all tables from DDL files
+# Create all tables from DDL files (requires metadata/ folder transferred)
 python scripts/create_tables.py --all
 
 # Create specific table
 python scripts/create_tables.py --table FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND
 
-# Drop and recreate tables (WARNING: deletes data)
+# Drop and recreate tables (useful for schema changes)
 python scripts/create_tables.py --all --drop-existing
+
+# Use password file (for encrypted DDL files)
+python scripts/create_tables.py --all --password-file ~/.encryption_key
 ```
 
-**Output:**
-- Tables created in PostgreSQL with correct schema
+**Features:**
+- ✅ **Supports encrypted DDL files** - Automatically detects and decrypts
+- ✅ **Deterministic file discovery** - Finds encrypted files using table names
+- ✅ **Schema verification** - Compares created table with metadata
+- ✅ **Automatic DDL execution** - Creates tables with correct structure
+- ✅ **Drop option** - Recreate tables when schema changes
+
+**Options:**
+- `--all` - Create all configured tables
+- `--table <name>` - Create specific table
+- `--drop-existing` - Drop table before creating (use with caution!)
+- `--password-file <path>` - Read password from file (for encrypted DDL)
+
+**When to use:**
+- ✅ First time setup (before importing data)
+- ✅ After metadata changes detected
+- ✅ When table structure needs to be updated
+
+**Note:** This command reads the encrypted DDL files from `metadata/ddl/`, so you need to have the `metadata/` folder transferred from Snowflake server first. Password is auto-sourced from `.env` if files are encrypted.
 
 ---
 
-#### **Step 4: Import Data**
+### **6. Import Data** (Decrypt and Load)
+
 ```bash
 # Import all tables
 python scripts/import_data.py --all
@@ -102,43 +280,55 @@ python scripts/import_data.py --all
 # Import specific table
 python scripts/import_data.py --table FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND
 
-# Import with password file (no prompt)
-python scripts/import_data.py --all --password-file ~/.encryption_key
-
 # Truncate table before loading
-python scripts/import_data.py --table FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND --truncate
+python scripts/import_data.py --all --truncate
 
-# Keep decrypted files for debugging
-python scripts/import_data.py --table FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND --keep-decrypted
+# Keep decrypted Parquet files (for debugging)
+python scripts/import_data.py --all --keep-decrypted
+
+# Use password file (for automation)
+python scripts/import_data.py --all --password-file ~/.encryption_key
 ```
 
-**Prompts:**
-- Enter decryption password: ********
+**Features:**
+- ✅ **Automatic folder discovery** - Finds obfuscated folders using deterministic IDs
+- ✅ **Manifest-based import** - Reads chunk information from manifest
+- ✅ **Checksum verification** - Ensures data integrity
+- ✅ **Row count verification** - Confirms all data loaded
 
-**Output:**
-- Data loaded into PostgreSQL tables
+**Options:**
+- `--all` - Import all tables
+- `--table <name>` - Import specific table
+- `--truncate` - Truncate table before loading
+- `--keep-decrypted` - Keep decrypted Parquet files (for debugging)
+- `--password-file <path>` - Read password from file
+
+**Password Prompt:**
+```
+Enter decryption password: ********
+```
 
 ---
 
 ## **Quick Copy-Paste Commands**
 
-### **For Your Current Table (FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND)**
+### **For Specific Table**
 
 **Snowflake Side:**
 ```bash
-# Step 1: Extract metadata
+# Extract metadata
 python scripts/extract_metadata.py --table FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND
 
-# Step 2: Export data
+# Export data
 python scripts/export_data.py --table FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND
 ```
 
 **PostgreSQL Side:**
 ```bash
-# Step 3: Create table
+# Create tables (one-time)
 python scripts/create_tables.py --table FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND
 
-# Step 4: Import data
+# Import data
 python scripts/import_data.py --table FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND
 ```
 
@@ -148,27 +338,115 @@ python scripts/import_data.py --table FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND
 
 **Snowflake Side:**
 ```bash
-# Step 1: Extract metadata
+# Extract metadata
 python scripts/extract_metadata.py --all
 
-# Step 2: Export data
+# Export data
 python scripts/export_data.py --all
 ```
 
 **PostgreSQL Side:**
 ```bash
-# Step 3: Create tables
+# Create tables (one-time)
 python scripts/create_tables.py --all
 
-# Step 4: Import data
+# Import data
 python scripts/import_data.py --all
 ```
 
 ---
 
-## **Testing & Verification Commands**
+## **Password Management**
+
+### **Option 1: Environment Variable (Recommended)**
+
+Set in `.env` file:
+```bash
+ENCRYPTION_PASSWORD=your_secure_password_here
+OBFUSCATE_NAMES=true
+```
+
+Scripts automatically use this password.
+
+### **Option 2: Password File (For Automation)**
+
+```bash
+# Create password file (one-time)
+echo "MySecurePassword123" > ~/.encryption_key
+chmod 600 ~/.encryption_key
+
+# Use in commands
+python scripts/export_data.py --all --password-file ~/.encryption_key
+python scripts/import_data.py --all --password-file ~/.encryption_key
+```
+
+### **Option 3: Interactive Prompt (Most Secure)**
+
+```bash
+# You'll be prompted for password
+python scripts/export_data.py --all
+# Enter password: ********
+# Confirm password: ********
+```
+
+**⚠️ Security Note:** Keep your password secure! It's not stored anywhere in the system.
+
+---
+
+## **Configuration Files**
+
+### **config/tables.yaml**
+
+Defines which tables to sync:
+
+```yaml
+tables:
+  - name: "FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND"
+    snowflake:
+      database: "CIGAM_PRD_RL"
+      schema: "MORNINGSTAR_MAIN"
+      table: "FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND"
+      filter:
+        - "WHERE _ID IN (SELECT mstarid FROM ...)"
+    postgres:
+      schema: "ms"
+      table: "FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND"
+```
+
+### **.env**
+
+Environment configuration:
+
+```bash
+# Encryption
+ENCRYPTION_PASSWORD=your_secure_password_here
+OBFUSCATE_NAMES=true
+
+# Snowflake Connection
+SNOWFLAKE_ACCOUNT=your_account
+SNOWFLAKE_USER=your_user
+SNOWFLAKE_AUTH_METHOD=sso
+SNOWFLAKE_ROLE=your_role
+SNOWFLAKE_WAREHOUSE=your_warehouse
+
+# PostgreSQL Connection
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=your_password
+POSTGRES_DATABASE=postgres
+
+# Export/Import Directories
+EXPORT_BASE_DIR=exports
+IMPORT_BASE_DIR=imports
+```
+
+---
+
+## **Testing & Verification**
 
 ### **Connection Tests**
+
 ```bash
 # Test Snowflake connection (VPN required)
 python test_snowflake.py
@@ -178,79 +456,61 @@ python test_postgres.py
 ```
 
 ### **PostgreSQL Verification**
+
 ```bash
 # List all tables
-psql -h localhost -p 50211 -U postgres -d postgres -c "\dt ms.*"
+psql -h localhost -p 5432 -U postgres -d postgres -c "\dt ms.*"
 
 # Check table structure
-psql -h localhost -p 50211 -U postgres -d postgres -c "\d ms.FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND"
+psql -h localhost -p 5432 -U postgres -d postgres -c "\d ms.FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND"
 
 # Check row count
-psql -h localhost -p 50211 -U postgres -d postgres -c "SELECT COUNT(*) FROM ms.FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND;"
+psql -h localhost -p 5432 -U postgres -d postgres -c "SELECT COUNT(*) FROM ms.FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND;"
 
 # View sample data
-psql -h localhost -p 50211 -U postgres -d postgres -c "SELECT * FROM ms.FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND LIMIT 10;"
+psql -h localhost -p 5432 -U postgres -d postgres -c "SELECT * FROM ms.FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND LIMIT 10;"
 ```
 
 ### **File Verification**
+
 ```bash
 # Check metadata files exist
 ls metadata/schemas/
 ls metadata/ddl/
 
 # Check export files exist
-ls D:/snowflake_exports/FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND/
+ls exports/
 
-# Check import files exist
-ls E:/postgres_imports/FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND/
+# List obfuscated folders
+ls exports/
 
-# View manifest
-cat D:/snowflake_exports/FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND/manifest.json
+# View manifest (need to decrypt first)
+python scripts/decrypt_metadata.py --table FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND
 ```
 
 ---
 
-## **Common Options**
+## **Troubleshooting**
 
-### **extract_metadata.py**
-```bash
---all                    # Extract metadata for all tables in config
---table <name>           # Extract metadata for specific table
---check-changes          # Enable change detection and alerting
---force                  # Force re-extraction even if no changes detected
---create-postgres        # Also create PostgreSQL tables after extraction
---drop-existing          # Drop existing PostgreSQL tables before creation
-```
+### **Common Issues**
 
-### **export_data.py**
-```bash
---all                    # Export all tables
---table <name>           # Export specific table
---chunk-size <number>    # Rows per chunk (default: 100000)
---password-file <path>   # Read password from file
-```
+**1. "Master index not found" error**
+- **Solution:** This is expected! We don't use index.enc anymore. The script reads from `config/tables.yaml` instead.
 
-### **create_tables.py**
-```bash
---all                    # Create all tables
---table <name>           # Create specific table
---drop-existing          # Drop tables if they exist (recreate)
-```
+**2. "Wrong password" error**
+- **Solution:** Ensure password matches what was used during export. Check `.env` file.
 
-### **import_data.py**
-```bash
---all                    # Import all tables
---table <name>           # Import specific table
---password-file <path>   # Read password from file
---truncate               # Truncate table before loading
---keep-decrypted         # Keep decrypted files (for debugging)
-```
+**3. "Table not found in config/tables.yaml"**
+- **Solution:** Add the table to `config/tables.yaml` first.
 
----
+**4. "Encrypted file not found"**
+- **Solution:** Ensure files were transferred from Snowflake server. Check folder names (they're obfuscated).
 
-## **Troubleshooting Commands**
+**5. Change detection not working**
+- **Solution:** Ensure `--no-check-changes` is NOT used. Change tracking is enabled by default.
 
 ### **Check Logs**
+
 ```bash
 # View pipeline log
 cat pipeline.log
@@ -262,95 +522,76 @@ tail -n 50 pipeline.log
 tail -f pipeline.log
 ```
 
-### **Check Manifest**
-```bash
-# View export manifest
-cat D:/snowflake_exports/FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND/manifest.json
-
-# Check filter used
-cat D:/snowflake_exports/FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND/manifest.json | grep filter
-
-# Check row count
-cat D:/snowflake_exports/FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND/manifest.json | grep total_rows
-```
-
-### **Verify Encryption**
-```bash
-# Check encrypted file size
-ls -lh D:/snowflake_exports/FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND/*.enc
-
-# Count encrypted chunks
-ls D:/snowflake_exports/FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND/*.enc | wc -l
-```
-
 ---
 
-## **Environment Setup**
+## **Key Features Summary**
 
-### **Activate Conda Environment**
-```bash
-# Activate environment
-conda activate data-pipeline-system
+### **Obfuscation (Enabled by Default)**
+- ✅ Folder names hashed: `1c81276c664e938a/`
+- ✅ File names hashed: `a1b2c3d4e5f6g7h8.enc`
+- ✅ Deterministic IDs: Same table = same ID
+- ✅ No index file needed: IDs generated from table names
+- ✅ Content encrypted: AES-256-GCM
 
-# Verify Python version
-python --version
+### **Change Tracking (Enabled by Default)**
+- ✅ Automatic detection: Compares old vs new metadata
+- ✅ Timestamped archives: `table_metadata_20250105.json`
+- ✅ Change logs: Detailed history of all changes
+- ✅ In-memory comparison: No temp files on disk
+- ✅ Alerts: Console warnings when changes detected
 
-# Verify packages installed
-conda list | grep snowflake
-conda list | grep psycopg2
-```
-
-### **Check Configuration**
-```bash
-# Verify .env file exists
-cat .env
-
-# Check tables configuration
-cat config/tables.yaml
-```
+### **Performance Optimizations**
+- ✅ Deterministic chunk IDs: No data hashing needed
+- ✅ Change detection: Skip unchanged files
+- ✅ In-memory operations: Faster comparisons
+- ✅ Efficient encryption: AES-256-GCM with PBKDF2
 
 ---
 
 ## **Complete Example Session**
 
 ### **Snowflake Server (VPN):**
+
 ```bash
 # Activate environment
-conda activate data-pipeline-system
+conda activate ms-pipeline
 
-# Step 1: Extract metadata
+# Step 1: Extract metadata (with change tracking)
 python scripts/extract_metadata.py --all
 # ✅ Metadata extracted to metadata/
+# ⚠️  METADATA CHANGES DETECTED! (if any)
 
 # Step 2: Export data
 python scripts/export_data.py --all
 # Enter password: MySecurePassword123
 # Confirm password: MySecurePassword123
-# ✅ Data exported to D:/snowflake_exports/
+# ✅ Data exported to exports/
 
-# Verify exports
-ls D:/snowflake_exports/
+# Optional: View changes
+python scripts/view_change_history.py --table FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND
+
+# Optional: Decrypt for review
+python scripts/decrypt_metadata.py --all
+# ✅ Decrypted to metadata/decrypted/
 ```
 
 ### **Manual Transfer:**
+
 ```bash
 # Copy to USB drive or network share
 # - metadata/
-# - config/tables.yaml
-# - D:/snowflake_exports/ → E:/postgres_imports/
+# - exports/
 ```
 
 ### **PostgreSQL Server (External):**
+
 ```bash
 # Activate environment
-conda activate data-pipeline-system
+conda activate ms-pipeline
 
-# Step 3: Create tables
+# Step 3: Create tables (one-time setup)
 python scripts/create_tables.py --all
 # ✅ Tables created in PostgreSQL
-
-# Verify tables
-psql -h localhost -p 50211 -U postgres -d postgres -c "\dt ms.*"
 
 # Step 4: Import data
 python scripts/import_data.py --all
@@ -358,7 +599,7 @@ python scripts/import_data.py --all
 # ✅ Data imported to PostgreSQL
 
 # Verify data
-psql -h localhost -p 50211 -U postgres -d postgres -c "SELECT COUNT(*) FROM ms.FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND;"
+psql -h localhost -p 5432 -U postgres -d postgres -c "SELECT COUNT(*) FROM ms.FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND;"
 ```
 
 ---
@@ -367,46 +608,28 @@ psql -h localhost -p 50211 -U postgres -d postgres -c "SELECT COUNT(*) FROM ms.F
 
 | Step | Command | Location | Output |
 |------|---------|----------|--------|
-| 1. Extract Metadata | `python scripts/extract_metadata.py --all` | Snowflake (VPN) | `metadata/` |
-| 2. Export Data | `python scripts/export_data.py --all` | Snowflake (VPN) | `D:/snowflake_exports/` |
-| 3. Create Tables | `python scripts/create_tables.py --all` | PostgreSQL | Tables in DB |
-| 4. Import Data | `python scripts/import_data.py --all` | PostgreSQL | Data in tables |
-
----
-
-## **Password Management**
-
-### **Option 1: Interactive (Recommended for first time)**
-```bash
-# You'll be prompted for password
-python scripts/export_data.py --all
-# Enter password: ********
-# Confirm password: ********
-```
-
-### **Option 2: Password File (For automation)**
-```bash
-# Create password file (one-time)
-echo "MySecurePassword123" > ~/.encryption_key
-chmod 600 ~/.encryption_key
-
-# Use password file
-python scripts/export_data.py --all --password-file ~/.encryption_key
-python scripts/import_data.py --all --password-file ~/.encryption_key
-```
-
-**⚠️ Security Note:** Keep your password secure! It's not stored anywhere in the system.
+| 1. Extract Metadata | `python scripts/extract_metadata.py --all` | Snowflake (VPN) | `metadata/` (encrypted) |
+| 2. Export Data | `python scripts/export_data.py --all` | Snowflake (VPN) | `exports/` (encrypted) |
+| 3. Transfer | Manual copy | Both | Files moved |
+| 4. Create Tables | `python scripts/create_tables.py --all` | PostgreSQL | Tables created |
+| 5. Import Data | `python scripts/import_data.py --all` | PostgreSQL | Data in tables |
 
 ---
 
 ## **Summary**
 
 **Snowflake Side (2 commands):**
-1. `python scripts/extract_metadata.py --all`
-2. `python scripts/export_data.py --all`
+```bash
+python scripts/extract_metadata.py --all
+python scripts/export_data.py --all
+```
 
 **PostgreSQL Side (2 commands):**
-3. `python scripts/create_tables.py --all`
-4. `python scripts/import_data.py --all`
+```bash
+python scripts/create_tables.py --all
+python scripts/import_data.py --all
+```
 
 **That's it!** 🎉
+
+All encryption, obfuscation, change tracking, and version control happen automatically.

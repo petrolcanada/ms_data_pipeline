@@ -3,6 +3,7 @@ PostgreSQL Loader
 Creates tables in PostgreSQL based on extracted metadata and loads data
 """
 import json
+import yaml
 import psycopg2
 from pathlib import Path
 from typing import Dict, Any, List
@@ -75,15 +76,14 @@ class PostgreSQLLoader:
                 cursor.execute(f"DROP TABLE IF EXISTS {postgres_schema}.{postgres_table} CASCADE")
                 logger.info(f"Dropped existing table {postgres_schema}.{postgres_table}")
             
-            # Execute DDL to create table
+            # Execute DDL to create table (includes CREATE INDEX statements if configured)
             cursor.execute(ddl)
             conn.commit()
             
             logger.info(f"Created table {postgres_schema}.{postgres_table}")
             
-            # Create indexes if needed
-            self._create_indexes(cursor, metadata, postgres_schema, postgres_table)
-            conn.commit()
+            # Note: Indexes are now created by the DDL script itself
+            # No need for separate _create_indexes call
             
             return {
                 "status": "success",
@@ -115,34 +115,6 @@ class PostgreSQLLoader:
         if match:
             return match.group(2)
         return "unknown"
-    
-    def _create_indexes(self, cursor, metadata: Dict[str, Any], schema: str, table: str):
-        """Create indexes based on metadata"""
-        # Create index on primary key columns (if not already created by PK constraint)
-        if metadata["primary_keys"]:
-            pk_cols = ", ".join(metadata["primary_keys"])
-            index_name = f"idx_{table}_pk"
-            try:
-                cursor.execute(f"""
-                    CREATE INDEX IF NOT EXISTS {index_name} 
-                    ON {schema}.{table} ({pk_cols})
-                """)
-                logger.info(f"Created index {index_name}")
-            except Exception as e:
-                logger.warning(f"Could not create PK index: {e}")
-        
-        # Create indexes on commonly queried columns
-        for col in metadata["columns"]:
-            if col["name"].lower() in ["id", "created_at", "updated_at", "date", "timestamp"]:
-                index_name = f"idx_{table}_{col['name'].lower()}"
-                try:
-                    cursor.execute(f"""
-                        CREATE INDEX IF NOT EXISTS {index_name} 
-                        ON {schema}.{table} ({col['name']})
-                    """)
-                    logger.info(f"Created index {index_name}")
-                except Exception as e:
-                    logger.warning(f"Could not create index {index_name}: {e}")
     
     def verify_table_structure(self, table_name: str) -> Dict[str, Any]:
         """Verify that PostgreSQL table matches Snowflake metadata"""

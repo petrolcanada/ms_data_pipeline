@@ -13,6 +13,8 @@ from pipeline.config.settings import get_settings, get_snowflake_connection_para
 from pipeline.utils.logger import get_logger
 from pipeline.utils.metadata_comparator import MetadataComparator
 from pipeline.utils.change_logger import ChangeLogger
+from pipeline.utils.config_validator import validate_index_configuration, IndexValidationError
+from pipeline.utils.ddl_generator import generate_ddl_with_indexes
 
 logger = get_logger(__name__)
 
@@ -524,40 +526,34 @@ class SnowflakeMetadataExtractor:
         
         return metadata_file, comparison
     
-    def generate_postgres_ddl(self, metadata: Dict[str, Any], postgres_schema: str, postgres_table: str) -> str:
-        """Generate PostgreSQL CREATE TABLE DDL from metadata"""
-        ddl_lines = [f"CREATE TABLE IF NOT EXISTS {postgres_schema}.{postgres_table} ("]
+    def generate_postgres_ddl(
+        self, 
+        metadata: Dict[str, Any], 
+        postgres_schema: str, 
+        postgres_table: str,
+        index_columns: List[str] = None
+    ) -> str:
+        """
+        Generate PostgreSQL CREATE TABLE DDL from metadata with optional indexes
         
-        column_definitions = []
+        Args:
+            metadata: Table metadata from Snowflake
+            postgres_schema: Target PostgreSQL schema
+            postgres_table: Target PostgreSQL table name
+            index_columns: Optional list of columns to index
+            
+        Returns:
+            Complete DDL script with table and index creation
+        """
+        if index_columns is None:
+            index_columns = []
         
-        # Add insertion timestamp column as the first column
-        column_definitions.append("    data_inserted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL")
-        
-        # Add all original columns from Snowflake
-        for col in metadata["columns"]:
-            col_def = f"    {col['name']} {col['postgres_type']}"
-            if not col['is_nullable']:
-                col_def += " NOT NULL"
-            if col['default_value']:
-                col_def += f" DEFAULT {col['default_value']}"
-            column_definitions.append(col_def)
-        
-        ddl_lines.append(",\n".join(column_definitions))
-        
-        # Add primary key constraint if exists
-        if metadata["primary_keys"]:
-            pk_cols = ", ".join(metadata["primary_keys"])
-            ddl_lines.append(f",\n    PRIMARY KEY ({pk_cols})")
-        
-        ddl_lines.append(");")
-        
-        # Add comments
-        ddl_lines.append(f"\n-- Source: {metadata['table_info']['full_name']}")
-        ddl_lines.append(f"-- Extracted: {metadata['extracted_at']}")
-        ddl_lines.append(f"-- Rows: {metadata['statistics']['row_count']}")
-        ddl_lines.append(f"-- Note: data_inserted_at column tracks when data was inserted into PostgreSQL")
-        
-        return "\n".join(ddl_lines)
+        return generate_ddl_with_indexes(
+            metadata,
+            postgres_schema,
+            postgres_table,
+            index_columns
+        )
     
     def save_postgres_ddl(self, ddl: str, table_name: str, password: Optional[str] = None) -> Path:
         """
@@ -631,6 +627,9 @@ class SnowflakeMetadataExtractor:
                 sf_config = table_config["snowflake"]
                 pg_config = table_config["postgres"]
                 
+                # Get index columns from config (default to empty list)
+                index_columns = pg_config.get("indexes", [])
+                
                 try:
                     logger.info(f"Processing table: {table_name}")
                     
@@ -641,6 +640,18 @@ class SnowflakeMetadataExtractor:
                         sf_config["table"],
                         conn=conn  # Pass existing connection
                     )
+                    
+                    # Validate index configuration
+                    if index_columns:
+                        try:
+                            validate_index_configuration(table_name, index_columns, metadata)
+                        except IndexValidationError as e:
+                            logger.error(f"Index validation failed for {table_name}: {e}")
+                            results[table_name] = {
+                                "status": "error",
+                                "error": f"Index validation failed: {str(e)}"
+                            }
+                            continue
                     
                     # Save metadata to file (with optional change checking)
                     metadata_file, comparison = self.save_metadata_to_file(
@@ -656,11 +667,12 @@ class SnowflakeMetadataExtractor:
                         logger.info(f"Skipping DDL generation for {table_name} (no changes detected)")
                         skip_ddl = True
                     
-                    # Generate PostgreSQL DDL
+                    # Generate PostgreSQL DDL with indexes
                     ddl = self.generate_postgres_ddl(
                         metadata,
                         pg_config["schema"],
-                        pg_config["table"]
+                        pg_config["table"],
+                        index_columns  # Pass index columns
                     )
                     
                     # Save DDL to file
@@ -672,6 +684,7 @@ class SnowflakeMetadataExtractor:
                         "ddl_file": str(ddl_file),
                         "columns": len(metadata["columns"]),
                         "row_count": metadata["statistics"]["row_count"],
+                        "indexes": len(index_columns) if index_columns else 0,
                         "has_changes": comparison["has_changes"] if comparison else None,
                         "is_new": comparison is None,
                         "comparison": comparison
