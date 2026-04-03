@@ -6,12 +6,10 @@ Compare different compression configurations side-by-side on real data
 Usage:
     python scripts/compare_compression.py --table financial_data
     python scripts/compare_compression.py --table financial_data --chunk-size 50000
-    python scripts/compare_compression.py --table financial_data --password-file ~/.encryption_key
 """
 import sys
 import json
 import argparse
-import getpass
 import time
 from pathlib import Path
 from datetime import datetime
@@ -28,29 +26,6 @@ from pipeline.utils.logger import get_logger
 import yaml
 
 logger = get_logger(__name__)
-
-
-def get_password(password_file: str = None, from_env: str = None) -> str:
-    """Get encryption password from environment, file, or prompt"""
-    if password_file:
-        password_path = Path(password_file).expanduser()
-        if password_path.exists():
-            with open(password_path, 'r') as f:
-                password = f.read().strip()
-            logger.info(f"Password loaded from {password_file}")
-            return password
-    
-    if from_env:
-        logger.info("Using encryption password from .env")
-        return from_env
-    
-    password = getpass.getpass("Enter encryption password: ")
-    confirm = getpass.getpass("Confirm password: ")
-    
-    if password != confirm:
-        raise ValueError("Passwords do not match!")
-    
-    return password
 
 
 def export_with_config(
@@ -260,10 +235,6 @@ def main():
         help="Table name to test"
     )
     parser.add_argument(
-        "--password-file",
-        help="Path to file containing encryption password"
-    )
-    parser.add_argument(
         "--chunk-size",
         type=int,
         default=100000,
@@ -284,9 +255,7 @@ def main():
         settings = get_settings()
         export_base_dir = getattr(settings, 'export_base_dir', 'exports')
         
-        # Get password
-        env_password = getattr(settings, 'encryption_password', None)
-        password = get_password(args.password_file, from_env=env_password)
+        password = settings.encryption_password
         
         # Load table configuration
         with open("config/tables.yaml", 'r') as f:

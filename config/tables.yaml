@@ -1,12 +1,24 @@
 # Snowflake Table Sync Configuration
+
+# Shared values — define once, reference with *alias
+peer_filter: &peer_filter "WHERE _ID IN (SELECT mstarid FROM CIGAM_SBX_PL.DNA_ANALYTICS_INSIGHTS_INVESTMENT_PRODUCT.V_MSTAR_PEERS_FCLASS_ETF_ID_CA_OPENEND)"
+
+sf_defaults: &sf_defaults
+  database: "CIGAM_PRD_RL"
+  schema: "MORNINGSTAR_MAIN"
+
 tables:
+  # --- Tables with full history (no QUALIFY, merge on _ID + _TIMESTAMPFROM) ---
+
   - name: "FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND"
+    sync_mode: "upsert"
+    merge_keys: ["_ID", "_TIMESTAMPFROM"]
+    watermark_column: "_TIMESTAMPFROM"
     snowflake:
-      database: "CIGAM_PRD_RL"
-      schema: "MORNINGSTAR_MAIN"
+      <<: *sf_defaults
       table: "FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND"
       filter:
-        - "WHERE _ID IN (SELECT mstarid FROM CIGAM_SBX_PL.DNA_ANALYTICS_INSIGHTS_INVESTMENT_PRODUCT.V_MSTAR_PEERS_FCLASS_ETF_ID_CA_OPENEND)"
+        - *peer_filter
     postgres:
       schema: "ms"
       table: "FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND"
@@ -16,13 +28,14 @@ tables:
         - "_TIMESTAMPTO"
 
   - name: "FUND_ATTRIBUTES_CA_OPENEND"
+    sync_mode: "upsert"
+    merge_keys: ["_ID", "_TIMESTAMPFROM"]
+    watermark_column: "_TIMESTAMPFROM"
     snowflake:
-      database: "CIGAM_PRD_RL"
-      schema: "MORNINGSTAR_MAIN"
+      <<: *sf_defaults
       table: "FUND_ATTRIBUTES_CA_OPENEND"
       filter:
-        - "WHERE _ID IN (SELECT mstarid FROM CIGAM_SBX_PL.DNA_ANALYTICS_INSIGHTS_INVESTMENT_PRODUCT.V_MSTAR_PEERS_FCLASS_ETF_ID_CA_OPENEND)"
-        - "QUALIFY ROW_NUMBER() OVER (PARTITION BY _ID ORDER BY _TIMESTAMPTO DESC) = 1"
+        - *peer_filter
     postgres:
       schema: "ms"
       table: "FUND_ATTRIBUTES_CA_OPENEND"
@@ -31,13 +44,51 @@ tables:
         - "_TIMESTAMPFROM"
         - "_TIMESTAMPTO"
 
-  - name: "MONTH_END_TRAILING_TOTAL_RETURNS_CA_OPENEND"
+  - name: "FUND_MANAGER_CA_OPENEND"
+    sync_mode: "upsert"
+    merge_keys: ["_ID", "_TIMESTAMPFROM"]
+    watermark_column: "_TIMESTAMPFROM"
     snowflake:
-      database: "CIGAM_PRD_RL"
-      schema: "MORNINGSTAR_MAIN"
+      <<: *sf_defaults
+      table: "FUND_MANAGER_CA_OPENEND"
+      filter:
+        - *peer_filter
+    postgres:
+      schema: "ms"
+      table: "FUND_MANAGER_CA_OPENEND"
+      indexes:
+        - "_ID"
+        - "_TIMESTAMPFROM"
+        - "_TIMESTAMPTO"
+
+  - name: "PROSPECTUS_FEES_CA_OPENEND"
+    sync_mode: "upsert"
+    merge_keys: ["_ID", "_TIMESTAMPFROM"]
+    watermark_column: "_TIMESTAMPFROM"
+    snowflake:
+      <<: *sf_defaults
+      table: "PROSPECTUS_FEES_CA_OPENEND"
+      filter:
+        - *peer_filter
+    postgres:
+      schema: "ms"
+      table: "PROSPECTUS_FEES_CA_OPENEND"
+      indexes:
+        - "_ID"
+        - "_TIMESTAMPFROM"
+        - "_TIMESTAMPTO"
+
+  # --- Tables with dedicated date key (QUALIFY keeps latest per key combo) ---
+
+  - name: "MONTH_END_TRAILING_TOTAL_RETURNS_CA_OPENEND"
+    sync_mode: "upsert"
+    merge_keys: ["_ID", "MONTHENDDATE"]
+    watermark_column: "_TIMESTAMPFROM"
+    snowflake:
+      <<: *sf_defaults
       table: "MONTH_END_TRAILING_TOTAL_RETURNS_CA_OPENEND"
       filter:
-        - "WHERE _ID IN (SELECT mstarid FROM CIGAM_SBX_PL.DNA_ANALYTICS_INSIGHTS_INVESTMENT_PRODUCT.V_MSTAR_PEERS_FCLASS_ETF_ID_CA_OPENEND)"
+        - *peer_filter
         - "QUALIFY ROW_NUMBER() OVER (PARTITION BY _ID, MONTHENDDATE ORDER BY _TIMESTAMPTO DESC) = 1"
     postgres:
       schema: "ms"
@@ -49,12 +100,14 @@ tables:
         - "_TIMESTAMPTO"
 
   - name: "FUND_FLOW_DETAILS_CA_OPENEND"
+    sync_mode: "upsert"
+    merge_keys: ["_ID", "ESTFUNDLEVELNETFLOWDATEMOEND"]
+    watermark_column: "_TIMESTAMPFROM"
     snowflake:
-      database: "CIGAM_PRD_RL"
-      schema: "MORNINGSTAR_MAIN"
+      <<: *sf_defaults
       table: "FUND_FLOW_DETAILS_CA_OPENEND"
       filter:
-        - "WHERE _ID IN (SELECT mstarid FROM CIGAM_SBX_PL.DNA_ANALYTICS_INSIGHTS_INVESTMENT_PRODUCT.V_MSTAR_PEERS_FCLASS_ETF_ID_CA_OPENEND)"
+        - *peer_filter
         - "QUALIFY ROW_NUMBER() OVER (PARTITION BY _ID, ESTFUNDLEVELNETFLOWDATEMOEND ORDER BY _TIMESTAMPTO DESC) = 1"
     postgres:
       schema: "ms"
@@ -66,12 +119,14 @@ tables:
         - "_TIMESTAMPTO"
 
   - name: "MORNINGSTAR_RATING_EXTENDED_PERFORMANCE_CA_OPENEND"
+    sync_mode: "upsert"
+    merge_keys: ["_ID", "RATINGDATE"]
+    watermark_column: "_TIMESTAMPFROM"
     snowflake:
-      database: "CIGAM_PRD_RL"
-      schema: "MORNINGSTAR_MAIN"
+      <<: *sf_defaults
       table: "MORNINGSTAR_RATING_EXTENDED_PERFORMANCE_CA_OPENEND"
       filter:
-        - "WHERE _ID IN (SELECT mstarid FROM CIGAM_SBX_PL.DNA_ANALYTICS_INSIGHTS_INVESTMENT_PRODUCT.V_MSTAR_PEERS_FCLASS_ETF_ID_CA_OPENEND)"
+        - *peer_filter
         - "QUALIFY ROW_NUMBER() OVER (PARTITION BY _ID, RATINGDATE ORDER BY _TIMESTAMPTO DESC) = 1"
     postgres:
       schema: "ms"
@@ -83,12 +138,14 @@ tables:
         - "_TIMESTAMPTO"
 
   - name: "MONTH_END_TRAILING_TOTAL_RETURN_PERCENTILE_AND_ABSOLUTE_RANKS_CA_OPENEND"
+    sync_mode: "upsert"
+    merge_keys: ["_ID", "MONTHENDDATE"]
+    watermark_column: "_TIMESTAMPFROM"
     snowflake:
-      database: "CIGAM_PRD_RL"
-      schema: "MORNINGSTAR_MAIN"
+      <<: *sf_defaults
       table: "MONTH_END_TRAILING_TOTAL_RETURN_PERCENTILE_AND_ABSOLUTE_RANKS_CA_OPENEND"
       filter:
-        - "WHERE _ID IN (SELECT mstarid FROM CIGAM_SBX_PL.DNA_ANALYTICS_INSIGHTS_INVESTMENT_PRODUCT.V_MSTAR_PEERS_FCLASS_ETF_ID_CA_OPENEND)"
+        - *peer_filter
         - "QUALIFY ROW_NUMBER() OVER (PARTITION BY _ID, MONTHENDDATE ORDER BY _TIMESTAMPTO DESC) = 1"
     postgres:
       schema: "ms"
@@ -100,12 +157,14 @@ tables:
         - "_TIMESTAMPTO"
 
   - name: "RELATIVE_RISK_MEASURE_PROSPECTUS_CA_OPENEND"
+    sync_mode: "upsert"
+    merge_keys: ["_ID", "ENDDATE"]
+    watermark_column: "_TIMESTAMPFROM"
     snowflake:
-      database: "CIGAM_PRD_RL"
-      schema: "MORNINGSTAR_MAIN"
+      <<: *sf_defaults
       table: "RELATIVE_RISK_MEASURE_PROSPECTUS_CA_OPENEND"
       filter:
-        - "WHERE _ID IN (SELECT mstarid FROM CIGAM_SBX_PL.DNA_ANALYTICS_INSIGHTS_INVESTMENT_PRODUCT.V_MSTAR_PEERS_FCLASS_ETF_ID_CA_OPENEND)"
+        - *peer_filter
         - "QUALIFY ROW_NUMBER() OVER (PARTITION BY _ID, ENDDATE ORDER BY _TIMESTAMPTO DESC) = 1"
     postgres:
       schema: "ms"
@@ -117,12 +176,14 @@ tables:
         - "_TIMESTAMPTO"
 
   - name: "FUND_LEVEL_NET_ASSETS_CA_OPENEND"
+    sync_mode: "upsert"
+    merge_keys: ["_ID", "NETASSETSDATE"]
+    watermark_column: "_TIMESTAMPFROM"
     snowflake:
-      database: "CIGAM_PRD_RL"
-      schema: "MORNINGSTAR_MAIN"
+      <<: *sf_defaults
       table: "FUND_LEVEL_NET_ASSETS_CA_OPENEND"
       filter:
-        - "WHERE _ID IN (SELECT mstarid FROM CIGAM_SBX_PL.DNA_ANALYTICS_INSIGHTS_INVESTMENT_PRODUCT.V_MSTAR_PEERS_FCLASS_ETF_ID_CA_OPENEND)"
+        - *peer_filter
         - "QUALIFY ROW_NUMBER() OVER (PARTITION BY _ID, NETASSETSDATE ORDER BY _TIMESTAMPTO DESC) = 1"
     postgres:
       schema: "ms"
@@ -134,12 +195,14 @@ tables:
         - "_TIMESTAMPTO"
 
   - name: "RISK_MEASURE_CA_OPENEND"
+    sync_mode: "upsert"
+    merge_keys: ["_ID", "ENDDATE"]
+    watermark_column: "_TIMESTAMPFROM"
     snowflake:
-      database: "CIGAM_PRD_RL"
-      schema: "MORNINGSTAR_MAIN"
+      <<: *sf_defaults
       table: "RISK_MEASURE_CA_OPENEND"
       filter:
-        - "WHERE _ID IN (SELECT mstarid FROM CIGAM_SBX_PL.DNA_ANALYTICS_INSIGHTS_INVESTMENT_PRODUCT.V_MSTAR_PEERS_FCLASS_ETF_ID_CA_OPENEND)"
+        - *peer_filter
         - "QUALIFY ROW_NUMBER() OVER (PARTITION BY _ID, ENDDATE ORDER BY _TIMESTAMPTO DESC) = 1"
     postgres:
       schema: "ms"
@@ -150,45 +213,15 @@ tables:
         - "_TIMESTAMPFROM"
         - "_TIMESTAMPTO"
 
-  - name: "FUND_MANAGER_CA_OPENEND"
-    snowflake:
-      database: "CIGAM_PRD_RL"
-      schema: "MORNINGSTAR_MAIN"
-      table: "FUND_MANAGER_CA_OPENEND"
-      filter:
-        - "WHERE _ID IN (SELECT mstarid FROM CIGAM_SBX_PL.DNA_ANALYTICS_INSIGHTS_INVESTMENT_PRODUCT.V_MSTAR_PEERS_FCLASS_ETF_ID_CA_OPENEND)"
-        - "QUALIFY ROW_NUMBER() OVER (PARTITION BY _ID ORDER BY _TIMESTAMPTO DESC) = 1"
-    postgres:
-      schema: "ms"
-      table: "FUND_MANAGER_CA_OPENEND"
-      indexes:
-        - "_ID"
-        - "_TIMESTAMPFROM"
-        - "_TIMESTAMPTO"
-
-  - name: "PROSPECTUS_FEES_CA_OPENEND"
-    snowflake:
-      database: "CIGAM_PRD_RL"
-      schema: "MORNINGSTAR_MAIN"
-      table: "PROSPECTUS_FEES_CA_OPENEND"
-      filter:
-        - "WHERE _ID IN (SELECT mstarid FROM CIGAM_SBX_PL.DNA_ANALYTICS_INSIGHTS_INVESTMENT_PRODUCT.V_MSTAR_PEERS_FCLASS_ETF_ID_CA_OPENEND)"
-        - "QUALIFY ROW_NUMBER() OVER (PARTITION BY _ID ORDER BY _TIMESTAMPTO DESC) = 1"
-    postgres:
-      schema: "ms"
-      table: "PROSPECTUS_FEES_CA_OPENEND"
-      indexes:
-        - "_ID"
-        - "_TIMESTAMPFROM"
-        - "_TIMESTAMPTO"
-
   - name: "ANNUAL_REPORT_FEES_CA_OPENEND"
+    sync_mode: "upsert"
+    merge_keys: ["_ID", "ANNUALREPORTDATE"]
+    watermark_column: "_TIMESTAMPFROM"
     snowflake:
-      database: "CIGAM_PRD_RL"
-      schema: "MORNINGSTAR_MAIN"
+      <<: *sf_defaults
       table: "ANNUAL_REPORT_FEES_CA_OPENEND"
       filter:
-        - "WHERE _ID IN (SELECT mstarid FROM CIGAM_SBX_PL.DNA_ANALYTICS_INSIGHTS_INVESTMENT_PRODUCT.V_MSTAR_PEERS_FCLASS_ETF_ID_CA_OPENEND)"
+        - *peer_filter
         - "QUALIFY ROW_NUMBER() OVER (PARTITION BY _ID, ANNUALREPORTDATE ORDER BY _TIMESTAMPTO DESC) = 1"
     postgres:
       schema: "ms"
@@ -200,12 +233,14 @@ tables:
         - "_TIMESTAMPTO"
 
   - name: "MORNINGSTAR_RATING_CA_OPENEND"
+    sync_mode: "upsert"
+    merge_keys: ["_ID", "RATINGDATE"]
+    watermark_column: "_TIMESTAMPFROM"
     snowflake:
-      database: "CIGAM_PRD_RL"
-      schema: "MORNINGSTAR_MAIN"
+      <<: *sf_defaults
       table: "MORNINGSTAR_RATING_CA_OPENEND"
       filter:
-        - "WHERE _ID IN (SELECT mstarid FROM CIGAM_SBX_PL.DNA_ANALYTICS_INSIGHTS_INVESTMENT_PRODUCT.V_MSTAR_PEERS_FCLASS_ETF_ID_CA_OPENEND)"
+        - *peer_filter
         - "QUALIFY ROW_NUMBER() OVER (PARTITION BY _ID, RATINGDATE ORDER BY _TIMESTAMPTO DESC) = 1"
     postgres:
       schema: "ms"
@@ -217,12 +252,14 @@ tables:
         - "_TIMESTAMPTO"
 
   - name: "FEE_LEVELS_CA_OPENEND"
+    sync_mode: "upsert"
+    merge_keys: ["_ID", "FEELEVELDATE"]
+    watermark_column: "_TIMESTAMPFROM"
     snowflake:
-      database: "CIGAM_PRD_RL"
-      schema: "MORNINGSTAR_MAIN"
+      <<: *sf_defaults
       table: "FEE_LEVELS_CA_OPENEND"
       filter:
-        - "WHERE _ID IN (SELECT mstarid FROM CIGAM_SBX_PL.DNA_ANALYTICS_INSIGHTS_INVESTMENT_PRODUCT.V_MSTAR_PEERS_FCLASS_ETF_ID_CA_OPENEND)"
+        - *peer_filter
         - "QUALIFY ROW_NUMBER() OVER (PARTITION BY _ID, FEELEVELDATE ORDER BY _TIMESTAMPTO DESC) = 1"
     postgres:
       schema: "ms"
@@ -232,4 +269,3 @@ tables:
         - "FEELEVELDATE"
         - "_TIMESTAMPFROM"
         - "_TIMESTAMPTO"
-

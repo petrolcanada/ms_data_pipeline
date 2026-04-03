@@ -10,11 +10,9 @@ Usage:
     python scripts/create_tables.py --all
     python scripts/create_tables.py --table financial_data
     python scripts/create_tables.py --all --drop-existing
-    python scripts/create_tables.py --all --password-file ~/.encryption_key
 """
 import sys
 import argparse
-import getpass
 import json
 import tempfile
 from pathlib import Path
@@ -30,33 +28,6 @@ from pipeline.utils.logger import get_logger
 import yaml
 
 logger = get_logger(__name__)
-
-
-def get_password(password_file: str = None, from_env: str = None) -> str:
-    """
-    Get encryption password from environment, file, or prompt
-    
-    Priority: password_file > from_env > prompt
-    """
-    # Try password file first
-    if password_file:
-        password_path = Path(password_file).expanduser()
-        if password_path.exists():
-            with open(password_path, 'r') as f:
-                password = f.read().strip()
-            logger.info(f"Password loaded from {password_file}")
-            return password
-        else:
-            logger.warning(f"Password file not found: {password_file}")
-    
-    # Try environment variable
-    if from_env:
-        logger.info("Using encryption password from .env")
-        return from_env
-    
-    # Prompt for password
-    password = getpass.getpass("Enter encryption password: ")
-    return password
 
 
 def create_table(table_name: str, drop_if_exists: bool = False, password: str = None):
@@ -81,8 +52,8 @@ def create_table(table_name: str, drop_if_exists: bool = False, password: str = 
     
     try:
         # Check if files are encrypted (obfuscated)
-        metadata_dir = Path("metadata/schemas")
-        ddl_dir = Path("metadata/ddl")
+        metadata_dir = Path("metadata/encrypted/schemas")
+        ddl_dir = Path("metadata/encrypted/ddl")
         
         # Try to find unencrypted files first
         metadata_file = metadata_dir / f"{table_name}_metadata.json"
@@ -94,7 +65,7 @@ def create_table(table_name: str, drop_if_exists: bool = False, password: str = 
             # Files might be encrypted - generate deterministic IDs
             if not password:
                 print(f"❌ Files appear to be encrypted but no password provided")
-                print(f"   Use --password-file or set ENCRYPTION_PASSWORD in .env")
+                print(f"   Set ENCRYPTION_PASSWORD in .env")
                 return False
             
             files_encrypted = True
@@ -358,11 +329,6 @@ def main():
         action="store_true",
         help="Drop tables if they already exist (recreate)"
     )
-    parser.add_argument(
-        "--password-file",
-        help="Path to file containing encryption password (for encrypted DDL files)"
-    )
-    
     args = parser.parse_args()
     
     if not args.table and not args.all:
@@ -375,18 +341,14 @@ def main():
         print(f"PostgreSQL Table Creation Script")
         print(f"{'=' * 70}")
         
-        # Get password if needed (priority: --password-file > ENCRYPTION_PASSWORD env > prompt if encrypted files detected)
         settings = get_settings()
-        env_password = getattr(settings, 'encryption_password', None)
-        password = None
+        password = settings.encryption_password
         
-        # Check if files are encrypted by looking for .enc files
-        ddl_dir = Path("metadata/ddl")
+        ddl_dir = Path("metadata/encrypted/ddl")
         encrypted_files = list(ddl_dir.glob("*.enc"))
         
         if encrypted_files:
             print(f"\n🔒 Detected {len(encrypted_files)} encrypted DDL files")
-            password = get_password(args.password_file, from_env=env_password)
         else:
             print(f"\n📁 Using unencrypted DDL files")
         

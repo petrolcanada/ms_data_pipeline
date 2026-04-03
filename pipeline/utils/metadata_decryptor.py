@@ -33,11 +33,11 @@ class MetadataDecryptor:
         Initialize MetadataDecryptor
         
         Args:
-            encrypted_dir: Directory containing encrypted metadata (default: metadata/)
-            decrypted_dir: Directory for decrypted files (default: metadata/decrypted/)
+            encrypted_dir: Directory containing encrypted metadata (default: metadata/encrypted/)
+            decrypted_dir: Directory for decrypted files (default: metadata/raw/)
         """
-        self.encrypted_dir = encrypted_dir or Path("metadata")
-        self.decrypted_dir = decrypted_dir or Path("metadata/decrypted")
+        self.encrypted_dir = encrypted_dir or Path("metadata/encrypted")
+        self.decrypted_dir = decrypted_dir or Path("metadata/raw")
         
         self.encrypted_schemas_dir = self.encrypted_dir / "schemas"
         self.encrypted_ddl_dir = self.encrypted_dir / "ddl"
@@ -259,10 +259,10 @@ class MetadataDecryptor:
         """
         Ensure decrypted directory is in .gitignore
         
-        Adds 'metadata/decrypted/' to .gitignore if not already present
+        Adds 'metadata/raw/' to .gitignore if not already present
         """
         gitignore_path = Path(".gitignore")
-        decrypted_pattern = "metadata/decrypted/"
+        decrypted_pattern = "metadata/raw/"
         
         # Read existing .gitignore
         existing_lines = []
@@ -280,7 +280,7 @@ class MetadataDecryptor:
             with open(gitignore_path, 'a') as f:
                 if existing_lines and not existing_lines[-1].strip() == '':
                     f.write('\n')  # Add newline if file doesn't end with one
-                f.write(f"\n# Decrypted metadata files (temporary, not tracked)\n")
+                f.write(f"\n# Raw metadata files (unencrypted, not tracked)\n")
                 f.write(f"{decrypted_pattern}\n")
             
             logger.info(f"✅ Added '{decrypted_pattern}' to .gitignore")

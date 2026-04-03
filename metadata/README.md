@@ -1,53 +1,61 @@
 # Metadata Directory
 
-This directory contains table metadata extracted from Snowflake, including schemas, DDL files, change logs, and decrypted files.
+This directory contains table metadata extracted from Snowflake, organized into encrypted (git-tracked) and raw (local-only) subdirectories.
 
 ## Directory Structure
 
 ```
 metadata/
-├── schemas/              # Table metadata (JSON format)
-├── ddl/                  # PostgreSQL DDL files (SQL format)
-├── changes/              # Change history logs (text format)
-├── decrypted/            # Decrypted files (NOT tracked by Git)
-└── index.enc             # Master index (when obfuscation is enabled)
+├── encrypted/               # Git-tracked, used on the PostgreSQL side
+│   ├── schemas/             # Table metadata (encrypted .enc or plain JSON)
+│   ├── ddl/                 # PostgreSQL DDL files (encrypted .enc or plain SQL)
+│   ├── changes/             # Change history logs (encrypted .enc or plain text)
+│   └── index.enc            # Master index (when obfuscation is enabled)
+├── raw/                     # NOT tracked by Git — investigation/logging only
+│   ├── schemas/             # Decrypted metadata JSON files
+│   ├── ddl/                 # Decrypted DDL SQL files
+│   └── changes/             # Decrypted change log files
+└── README.md
 ```
+
+## Encrypted vs Raw
+
+| Aspect | `encrypted/` | `raw/` |
+|--------|-------------|--------|
+| Git tracked | Yes | No (`.gitignore`) |
+| Purpose | Production storage, psql side | Debugging, investigation, logging |
+| File format | `.enc` (obfuscated) or plain text | Always human-readable |
+| Safe to commit | Yes | Never |
 
 ## File Types
 
 ### Encrypted Files (Obfuscation Enabled)
 - **Format**: `{random_id}.enc`
 - **Example**: `4923cba5118f2c90.enc`
-- **Location**: `schemas/` and `ddl/`
+- **Location**: `encrypted/schemas/` and `encrypted/ddl/`
 - **Purpose**: Secure storage of sensitive metadata
-- **Git**: Tracked
 
 ### Plain Text Files (Obfuscation Disabled)
 - **Format**: `{table_name}_metadata.json` or `{table_name}_create.sql`
 - **Example**: `FUND_SHARE_CLASS_BASIC_INFO_metadata.json`
-- **Location**: `schemas/` and `ddl/`
+- **Location**: `encrypted/schemas/` and `encrypted/ddl/`
 - **Purpose**: Human-readable metadata storage
-- **Git**: Tracked
 
 ### Archived Files
 - **Format**: `{file_id}_{YYYYMMDD}.enc` or `{table_name}_{YYYYMMDD}_metadata.json`
 - **Example**: `4923cba5118f2c90_20240103.enc`
-- **Location**: `schemas/` and `ddl/`
+- **Location**: `encrypted/schemas/` and `encrypted/ddl/`
 - **Purpose**: Historical versions when schema changes
-- **Git**: Tracked
 
 ### Change Logs
-- **Format**: `{table_name}_changes.log`
-- **Example**: `FUND_SHARE_CLASS_BASIC_INFO_changes.log`
-- **Location**: `changes/`
+- **Format**: `{table_name}_changes.log` or `{file_id}.enc`
+- **Location**: `encrypted/changes/`
 - **Purpose**: Persistent record of all metadata changes
-- **Git**: Tracked
 
-### Decrypted Files
+### Raw (Decrypted) Files
 - **Format**: `{table_name}_metadata.json` or `{table_name}_create.sql`
-- **Location**: `decrypted/schemas/` and `decrypted/ddl/`
+- **Location**: `raw/schemas/` and `raw/ddl/`
 - **Purpose**: Temporary human-readable versions for debugging
-- **Git**: NOT tracked (automatically ignored)
 
 ## Usage
 
@@ -65,7 +73,7 @@ python scripts/extract_metadata.py --all --check-changes
 
 ### Decrypt Metadata (Obfuscation Enabled)
 ```bash
-# Decrypt all tables
+# Decrypt all tables (writes to metadata/raw/)
 python scripts/decrypt_metadata.py --all --password <password>
 
 # Decrypt specific table
@@ -74,7 +82,7 @@ python scripts/decrypt_metadata.py --table TABLE_NAME --password <password>
 # List available tables
 python scripts/decrypt_metadata.py --list --password <password>
 
-# Clean up decrypted files
+# Clean up raw files
 python scripts/decrypt_metadata.py --clean
 ```
 
@@ -95,12 +103,12 @@ python scripts/view_change_history.py --summary
 
 ## Security Notes
 
-- **Encrypted files** are safe to commit to Git
-- **Decrypted files** are automatically excluded from Git (via `.gitignore`)
+- **Encrypted files** (`encrypted/`) are safe to commit to Git
+- **Raw files** (`raw/`) are automatically excluded from Git (via `.gitignore`)
 - **Change logs** contain table names but no sensitive data
-- **Master index** (`index.enc`) maps table names to encrypted file IDs
+- **Master index** (`encrypted/index.enc`) maps table names to encrypted file IDs
 - Always use strong passwords for encryption
-- Never commit decrypted files or passwords
+- Never commit raw/decrypted files or passwords
 
 ## Change Tracking
 
@@ -111,7 +119,7 @@ When `--check-changes` is enabled during metadata extraction:
 3. **Changes Detected**: Archives old files, logs changes, saves new files
 4. **No Changes**: Skips archiving and logging
 
-Change logs are written to `changes/{table_name}_changes.log` and include:
+Change logs are written to `encrypted/changes/` and include:
 - Timestamp (ISO 8601 format)
 - Summary of changes
 - Detailed change list
@@ -121,23 +129,15 @@ Change logs are written to `changes/{table_name}_changes.log` and include:
 
 ### Cannot decrypt files
 - Verify password is correct
-- Ensure `index.enc` exists
-- Check that encrypted files exist in `schemas/` and `ddl/`
+- Ensure `encrypted/index.enc` exists
+- Check that encrypted files exist in `encrypted/schemas/` and `encrypted/ddl/`
 
 ### Change logs not created
 - Ensure `--check-changes` flag is used during extraction
-- Check that `metadata/changes/` directory exists
+- Check that `metadata/encrypted/changes/` directory exists
 - Verify write permissions
 
-### Decrypted files committed to Git
+### Raw files committed to Git
 - Run `python scripts/decrypt_metadata.py --clean`
-- Verify `.gitignore` contains `metadata/decrypted/`
-- Remove from Git: `git rm -r --cached metadata/decrypted/`
-
-## Related Documentation
-
-- **[Metadata Workflow Guide](../docs/metadata-workflow-guide.md)** - Complete step-by-step workflows
-- **[Quick Reference](../docs/metadata-quick-reference.md)** - Command cheat sheet
-- [Metadata Change Tracking Guide](../docs/metadata-change-tracking.md)
-- [Command Reference](../docs/command-reference.md)
-- [Complete Workflow](../docs/complete-workflow.md)
+- Verify `.gitignore` contains `metadata/raw/`
+- Remove from Git: `git rm -r --cached metadata/raw/`

@@ -97,5 +97,5 @@ htmlcov/
 .dmypy.json
 dmypy.json
 
-# Decrypted metadata files (temporary, not tracked)
-metadata/decrypted/
+# Raw metadata files (unencrypted, not tracked)
+metadata/raw/

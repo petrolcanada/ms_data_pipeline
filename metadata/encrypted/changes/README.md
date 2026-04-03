@@ -32,8 +32,8 @@ Changes:
       New: NUMERIC(18,2)
 
 Archived Files:
-  - metadata/schemas/TABLE_NAME_20240103_metadata.json
-  - metadata/ddl/TABLE_NAME_20240103_create.sql
+  - metadata/encrypted/schemas/TABLE_NAME_20240103_metadata.json
+  - metadata/encrypted/ddl/TABLE_NAME_20240103_create.sql
 
 ================================================================================
 ```
@@ -104,7 +104,7 @@ Benefits:
 
 ### No log files created
 - Ensure `--check-changes` flag is used during extraction
-- Verify write permissions on `metadata/changes/` directory
+- Verify write permissions on `metadata/encrypted/changes/` directory
 - Check console output for errors
 
 ### Log files not updating

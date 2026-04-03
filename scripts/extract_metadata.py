@@ -5,7 +5,6 @@ Run this script to extract metadata from Snowflake tables and generate PostgreSQ
 """
 import sys
 import argparse
-import getpass
 from pathlib import Path
 from datetime import datetime
 
@@ -18,48 +17,6 @@ from pipeline.transformers.obfuscator import MetadataObfuscator
 from pipeline.config.settings import get_settings
 
 
-def get_password(from_env: bool = True, password_file: str = None) -> str:
-    """
-    Get encryption password from various sources
-    
-    Priority:
-    1. Password file (if specified)
-    2. Environment variable (if from_env=True)
-    3. Interactive prompt
-    
-    Args:
-        from_env: Whether to check environment variable
-        password_file: Path to file containing password
-        
-    Returns:
-        Password string
-    """
-    # Try password file first
-    if password_file:
-        try:
-            with open(password_file, 'r') as f:
-                password = f.read().strip()
-            if password:
-                print(f"Using password from file: {password_file}")
-                return password
-        except Exception as e:
-            print(f"Warning: Could not read password file: {e}")
-    
-    # Try environment variable
-    if from_env:
-        settings = get_settings()
-        if settings.encryption_password:
-            print("Using password from ENCRYPTION_PASSWORD environment variable")
-            return settings.encryption_password
-    
-    # Prompt user
-    password = getpass.getpass("Enter encryption password: ")
-    if not password:
-        raise ValueError("Password cannot be empty")
-    
-    return password
-
-
 def main():
     parser = argparse.ArgumentParser(description="Extract metadata from Snowflake tables")
     parser.add_argument("--table", help="Extract metadata for specific table")
@@ -69,7 +26,6 @@ def main():
     parser.add_argument("--create-postgres", action="store_true", help="Also create PostgreSQL tables")
     parser.add_argument("--drop-existing", action="store_true", help="Drop existing PostgreSQL tables")
     parser.add_argument("--no-obfuscate", action="store_true", help="Disable name obfuscation (enabled by default)")
-    parser.add_argument("--password-file", help="Path to file containing encryption password")
     
     args = parser.parse_args()
     
@@ -91,13 +47,7 @@ def main():
     if obfuscate:
         print("Obfuscation: ENABLED")
         obfuscator = MetadataObfuscator()
-        
-        # Get password for encryption
-        try:
-            password = get_password(from_env=True, password_file=args.password_file)
-        except Exception as e:
-            print(f"Error: {e}")
-            sys.exit(1)
+        password = settings.encryption_password
     else:
         print("Obfuscation: DISABLED")
     
@@ -172,8 +122,8 @@ def main():
                                 print(f"      Position {change['old_position']} → {change['new_position']}")
                     
                     print(f"\nArchived old metadata:")
-                    print(f"  • metadata/schemas/{args.table}_{datetime.now().strftime('%Y%m%d')}_metadata.json")
-                    print(f"  • metadata/ddl/{args.table}_{datetime.now().strftime('%Y%m%d')}_create.sql")
+                    print(f"  • metadata/encrypted/schemas/{args.table}_{datetime.now().strftime('%Y%m%d')}_metadata.json")
+                    print(f"  • metadata/encrypted/ddl/{args.table}_{datetime.now().strftime('%Y%m%d')}_create.sql")
                     print("=" * 70)
                     print()
                 else:
@@ -289,8 +239,8 @@ def main():
                                 print(f"      Position {change['old_position']} → {change['new_position']}")
                     
                     print(f"\nArchived old metadata:")
-                    print(f"  • metadata/schemas/{table}_{datetime.now().strftime('%Y%m%d')}_metadata.json")
-                    print(f"  • metadata/ddl/{table}_{datetime.now().strftime('%Y%m%d')}_create.sql")
+                    print(f"  • metadata/encrypted/schemas/{table}_{datetime.now().strftime('%Y%m%d')}_metadata.json")
+                    print(f"  • metadata/encrypted/ddl/{table}_{datetime.now().strftime('%Y%m%d')}_create.sql")
                     print()
             
             if changes_detected:

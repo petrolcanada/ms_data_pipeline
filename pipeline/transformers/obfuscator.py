@@ -1,9 +1,14 @@
 """
 Data Export Obfuscator
-Generates random identifiers for folders and files to enhance security
+Generates random identifiers for folders and files to enhance security.
+
+Includes salted deterministic IDs, secure temp-file handling, and encrypted
+master indexes.
 """
+import os
 import secrets
 import json
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional
 from datetime import datetime
@@ -24,16 +29,27 @@ class DataObfuscator:
     - Master index creation and encryption
     """
     
-    def __init__(self, identifier_length: int = 16):
+    def __init__(self, identifier_length: int = 16, salt: Optional[str] = None):
         """
-        Initialize obfuscator
-        
+        Initialize obfuscator.
+
         Args:
-            identifier_length: Length of generated identifiers (default: 16 chars)
+            identifier_length: Length of generated identifiers (default: 16 chars).
+            salt: Secret salt mixed into deterministic ID generation.
+                  Falls back to OBFUSCATION_SALT from settings if not provided.
         """
         self.identifier_length = identifier_length
-        self._used_identifiers = set()
+        self._used_identifiers: set = set()
         self.encryptor = FileEncryptor()
+
+        if salt is not None:
+            self._salt = salt
+        else:
+            try:
+                from pipeline.config.settings import get_settings
+                self._salt = get_settings().obfuscation_salt or ""
+            except Exception:
+                self._salt = ""
     
     def generate_identifier(self) -> str:
         """
@@ -58,27 +74,20 @@ class DataObfuscator:
     
     def generate_deterministic_identifier(self, key: str, context: str = "") -> str:
         """
-        Generate a deterministic identifier based on a key
-        
-        This ensures the same key always produces the same identifier,
-        which is useful for table-level files that should have consistent
-        names across multiple runs.
-        
-        Args:
-            key: The key to generate identifier from (e.g., table name)
-            context: Optional context to include in hash (e.g., "metadata", "ddl", "folder")
-            
-        Returns:
-            Hexadecimal string identifier (deterministic)
+        Generate a deterministic identifier based on a key.
+
+        When an obfuscation salt is configured (OBFUSCATION_SALT env var or
+        passed at init), the salt is mixed in so that the mapping is not
+        reproducible without the secret.
         """
         import hashlib
-        
-        # Create deterministic ID from key + context
-        data = f"{key}:{context}".encode('utf-8')
+
+        salt_prefix = self._salt or ""
+        data = f"{salt_prefix}:{key}:{context}".encode("utf-8")
         hash_obj = hashlib.sha256(data)
-        identifier = hash_obj.hexdigest()[:self.identifier_length]
-        
-        logger.debug(f"Generated deterministic identifier for '{key}' (context: '{context}'): {identifier}")
+        identifier = hash_obj.hexdigest()[: self.identifier_length]
+
+        logger.debug(f"Generated deterministic identifier (context: '{context}')")
         return identifier
     
     def generate_folder_id(self, table_name: str) -> str:
@@ -95,7 +104,7 @@ class DataObfuscator:
             Deterministic folder identifier
         """
         folder_id = self.generate_deterministic_identifier(table_name, "folder")
-        logger.info(f"Generated folder ID for table '{table_name}': {folder_id}")
+        logger.debug(f"Generated folder ID for table: {folder_id}")
         return folder_id
     
     def generate_file_id(self, chunk_number: int) -> str:
@@ -149,7 +158,7 @@ class DataObfuscator:
             Deterministic manifest file identifier
         """
         manifest_id = self.generate_deterministic_identifier(table_name, "manifest")
-        logger.info(f"Generated manifest ID for table '{table_name}': {manifest_id}")
+        logger.debug(f"Generated manifest ID: {manifest_id}")
         return manifest_id
     
     def create_master_index(
@@ -181,21 +190,18 @@ class DataObfuscator:
             
             logger.info(f"Creating master index with {len(table_mappings)} table(s)")
             
-            # Save as temporary JSON file
-            temp_json = output_path.parent / "index.json.tmp"
-            with open(temp_json, 'w') as f:
-                json.dump(master_index, f, indent=2)
-            
-            # Encrypt the index file
-            logger.info("Encrypting master index...")
-            encryption_info = self.encryptor.encrypt_file(
-                temp_json,
-                output_path,
-                password
-            )
-            
-            # Remove temporary file
-            temp_json.unlink()
+            # Use secure temp file with restrictive permissions
+            fd, tmp_path_str = tempfile.mkstemp(suffix=".json", dir=str(output_path.parent))
+            temp_json = Path(tmp_path_str)
+            try:
+                with os.fdopen(fd, "w") as f:
+                    json.dump(master_index, f, indent=2)
+                
+                logger.info("Encrypting master index...")
+                encryption_info = self.encryptor.encrypt_file(temp_json, output_path, password)
+            finally:
+                if temp_json.exists():
+                    temp_json.unlink()
             
             logger.info(f"Master index created and encrypted: {output_path}")
             logger.info(f"  Size: {encryption_info['encrypted_size'] / 1024:.2f} KB")
@@ -229,20 +235,16 @@ class DataObfuscator:
         try:
             logger.info(f"Decrypting master index: {index_path}")
             
-            # Decrypt the index file
-            temp_json = index_path.parent / "index.json.tmp"
-            self.encryptor.decrypt_file(
-                index_path,
-                temp_json,
-                password
-            )
-            
-            # Load JSON
-            with open(temp_json, 'r') as f:
-                master_index = json.load(f)
-            
-            # Remove temporary file
-            temp_json.unlink()
+            fd, tmp_path_str = tempfile.mkstemp(suffix=".json", dir=str(index_path.parent))
+            temp_json = Path(tmp_path_str)
+            os.close(fd)
+            try:
+                self.encryptor.decrypt_file(index_path, temp_json, password)
+                with open(temp_json, "r") as f:
+                    master_index = json.load(f)
+            finally:
+                if temp_json.exists():
+                    temp_json.unlink()
             
             logger.info(f"Master index decrypted successfully")
             logger.info(f"  Version: {master_index.get('version')}")
@@ -320,9 +322,9 @@ class MetadataObfuscator(DataObfuscator):
         file_id = self.generate_deterministic_identifier(key, file_type if not timestamp else "")
         
         if timestamp:
-            logger.debug(f"Generated {file_type} file ID for table '{table_name}' with timestamp {timestamp}: {file_id}")
+            logger.debug(f"Generated {file_type} file ID with timestamp {timestamp}: {file_id}")
         else:
-            logger.info(f"Generated {file_type} file ID for table '{table_name}': {file_id}")
+            logger.debug(f"Generated {file_type} file ID: {file_id}")
         
         return file_id
     
@@ -356,21 +358,17 @@ class MetadataObfuscator(DataObfuscator):
             
             logger.info(f"Creating metadata master index with {len(table_mappings)} table(s)")
             
-            # Save as temporary JSON file
-            temp_json = output_path.parent / "metadata_index.json.tmp"
-            with open(temp_json, 'w') as f:
-                json.dump(master_index, f, indent=2)
-            
-            # Encrypt the index file
-            logger.info("Encrypting metadata master index...")
-            encryption_info = self.encryptor.encrypt_file(
-                temp_json,
-                output_path,
-                password
-            )
-            
-            # Remove temporary file
-            temp_json.unlink()
+            fd, tmp_path_str = tempfile.mkstemp(suffix=".json", dir=str(output_path.parent))
+            temp_json = Path(tmp_path_str)
+            try:
+                with os.fdopen(fd, "w") as f:
+                    json.dump(master_index, f, indent=2)
+                
+                logger.info("Encrypting metadata master index...")
+                encryption_info = self.encryptor.encrypt_file(temp_json, output_path, password)
+            finally:
+                if temp_json.exists():
+                    temp_json.unlink()
             
             logger.info(f"Metadata master index created and encrypted: {output_path}")
             logger.info(f"  Size: {encryption_info['encrypted_size'] / 1024:.2f} KB")

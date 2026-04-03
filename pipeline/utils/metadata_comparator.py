@@ -210,6 +210,14 @@ class MetadataComparator:
             })
             logger.info("Clustering key changed")
     
+    def classify_changes(self) -> Dict[str, list]:
+        """Classify accumulated changes as safe (additive) or breaking.
+
+        Delegates to ddl_generator.classify_schema_changes.
+        """
+        from pipeline.utils.ddl_generator import classify_schema_changes
+        return classify_schema_changes(self.changes)
+
     def _generate_summary(self) -> str:
         """Generate human-readable summary of changes"""
         if not self.changes:

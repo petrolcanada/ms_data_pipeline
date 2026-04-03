@@ -3,8 +3,10 @@ Snowflake Data Extractor
 Extracts data from Snowflake tables in chunks and saves as compressed Parquet files
 """
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 from pathlib import Path
-from typing import Dict, Any, Generator, Optional
+from typing import Dict, Any, Generator, Optional, List
 import snowflake.connector
 from pipeline.config.settings import get_settings
 from pipeline.connections import SnowflakeConnectionManager
@@ -243,6 +245,33 @@ class SnowflakeDataExtractor:
         finally:
             cursor.close()
     
+    def inject_watermark(
+        self,
+        filter_clause: str,
+        watermark_column: str,
+        watermark_value: str,
+    ) -> str:
+        """Append a watermark predicate to an existing filter clause.
+        
+        If there is already a WHERE clause the watermark is ANDed in;
+        otherwise a new WHERE is created. QUALIFY clauses are preserved
+        after the watermark.
+        """
+        predicate = f"{watermark_column} > '{watermark_value}'"
+
+        if not filter_clause:
+            return f"WHERE {predicate}"
+
+        upper = filter_clause.upper()
+        qualify_idx = upper.find("QUALIFY")
+
+        if qualify_idx == -1:
+            return f"{filter_clause} AND {predicate}"
+
+        before_qualify = filter_clause[:qualify_idx].rstrip()
+        qualify_part = filter_clause[qualify_idx:]
+        return f"{before_qualify} AND {predicate} {qualify_part}"
+
     def extract_table_chunks(
         self, 
         database: str, 
@@ -329,16 +358,37 @@ class SnowflakeDataExtractor:
         finally:
             cursor.close()
     
+    def _detect_dictionary_columns(self, df: pd.DataFrame, threshold: float = 0.5) -> List[str]:
+        """
+        Identify columns that benefit from Parquet dictionary encoding.
+        
+        Low-cardinality columns (unique ratio below threshold) compress
+        dramatically better with dictionary encoding.
+        """
+        dict_cols = []
+        for col in df.columns:
+            dtype = df[col].dtype
+            if dtype == 'object' or dtype.name == 'category':
+                n_unique = df[col].nunique()
+                n_total = len(df)
+                if n_total > 0 and (n_unique / n_total) < threshold:
+                    dict_cols.append(col)
+            elif dtype.name in ('int8', 'int16', 'bool'):
+                dict_cols.append(col)
+        return dict_cols
+
     def save_chunk_to_parquet(
         self, 
         df: pd.DataFrame, 
         output_path: Path, 
         compression: str = 'zstd',
-        compression_level: int = 3,
-        optimize_types: bool = True
+        compression_level: int = 9,
+        optimize_types: bool = True,
+        sort_columns: Optional[List[str]] = None,
+        use_dictionary_encoding: bool = True,
     ) -> Dict[str, Any]:
         """
-        Save DataFrame chunk as compressed Parquet file
+        Save DataFrame chunk as compressed Parquet file with advanced encoding.
         
         Args:
             df: DataFrame to save
@@ -346,27 +396,62 @@ class SnowflakeDataExtractor:
             compression: Compression algorithm (snappy, gzip, zstd, brotli)
             compression_level: Compression level (1-9 for gzip, 1-22 for zstd, 0-11 for brotli)
             optimize_types: If True, optimize data types before compression
+            sort_columns: Columns to sort by before writing (improves compression ratio)
+            use_dictionary_encoding: If True, auto-detect and apply dictionary encoding
             
         Returns:
             Dictionary with file metadata
         """
         try:
-            # Ensure output directory exists
             output_path.parent.mkdir(parents=True, exist_ok=True)
             
-            # Optimize data types for better compression
             optimization_stats = None
             if optimize_types:
                 logger.info("Optimizing data types for better compression...")
                 df, optimization_stats = optimize_dataframe(df, aggressive=False)
             
-            # Save as Parquet with compression
-            df.to_parquet(
-                output_path,
-                engine='pyarrow',
+            # Pre-sort: sorting by clustered columns improves RLE and dictionary
+            # encoding within Parquet row groups
+            sorted_by = []
+            if sort_columns:
+                valid_sort = [c for c in sort_columns if c in df.columns]
+                if valid_sort:
+                    df = df.sort_values(by=valid_sort, ignore_index=True)
+                    sorted_by = valid_sort
+                    logger.info(f"Pre-sorted by {valid_sort} for better compression")
+            
+            # Convert to PyArrow table for fine-grained encoding control
+            table = pa.Table.from_pandas(df, preserve_index=False)
+            
+            # Auto-detect low-cardinality columns for dictionary encoding
+            dict_columns = []
+            if use_dictionary_encoding:
+                dict_columns = self._detect_dictionary_columns(df)
+                if dict_columns:
+                    logger.debug(f"Dictionary encoding for {len(dict_columns)} columns: {dict_columns[:5]}...")
+            
+            # Build per-column compression spec — use byte_stream_split for
+            # float columns (better for real-valued data) when the main codec is zstd
+            column_compression = None
+            if compression in ('zstd', 'gzip', 'brotli'):
+                column_compression = {}
+                for field in table.schema:
+                    col_name = field.name
+                    if pa.types.is_floating(field.type):
+                        column_compression[col_name] = {
+                            'codec': compression,
+                            'encoding': 'BYTE_STREAM_SPLIT',
+                        }
+            
+            # Write with PyArrow for encoding control
+            pq.write_table(
+                table,
+                str(output_path),
                 compression=compression,
-                compression_level=compression_level if compression in ['gzip', 'zstd', 'brotli'] else None,
-                index=False
+                compression_level=compression_level if compression in ('gzip', 'zstd', 'brotli') else None,
+                use_dictionary=dict_columns if dict_columns else False,
+                write_statistics=True,
+                data_page_size=1024 * 1024,
             )
             
             file_size = output_path.stat().st_size
@@ -375,13 +460,19 @@ class SnowflakeDataExtractor:
             logger.debug(f"  Rows: {len(df):,}")
             logger.debug(f"  Size: {file_size / (1024 * 1024):.2f} MB")
             logger.debug(f"  Compression: {compression} (level {compression_level})")
+            if sorted_by:
+                logger.debug(f"  Sorted by: {sorted_by}")
+            if dict_columns:
+                logger.debug(f"  Dictionary columns: {len(dict_columns)}")
             
             result = {
                 "rows": len(df),
                 "size_bytes": file_size,
                 "size_mb": file_size / (1024 * 1024),
                 "compression": compression,
-                "compression_level": compression_level
+                "compression_level": compression_level,
+                "sorted_by": sorted_by,
+                "dictionary_columns": len(dict_columns),
             }
             
             if optimization_stats:

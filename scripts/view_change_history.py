@@ -14,29 +14,8 @@ from pipeline.utils.change_logger import ChangeLogger
 from pipeline.utils.logger import get_logger
 from pipeline.config.settings import get_settings
 from pipeline.transformers.obfuscator import MetadataObfuscator
-import getpass
 
 logger = get_logger(__name__)
-
-
-def get_password_from_env_or_prompt(password_arg: str = None) -> str:
-    """
-    Get password from argument, .env file, or prompt
-    
-    Priority: command line argument > .env file > prompt
-    """
-    # Try command line argument first
-    if password_arg:
-        return password_arg
-    
-    # Try .env file
-    settings = get_settings()
-    if settings.encryption_password:
-        logger.info("Using encryption password from .env file")
-        return settings.encryption_password
-    
-    # Prompt for password
-    return getpass.getpass("Enter decryption password: ")
 
 
 def main():
@@ -95,12 +74,6 @@ Examples:
     )
     
     parser.add_argument(
-        '--password',
-        type=str,
-        help='Decryption password (for encrypted change logs, will use .env or prompt if not provided)'
-    )
-    
-    parser.add_argument(
         '--no-obfuscate',
         action='store_true',
         help='Change logs are NOT encrypted/obfuscated (obfuscation enabled by default)'
@@ -119,11 +92,10 @@ Examples:
     settings = get_settings()
     obfuscated = not args.no_obfuscate and settings.obfuscate_names
     
-    # Get password and obfuscator if obfuscation enabled
     password = None
     obfuscator = None
     if obfuscated:
-        password = get_password_from_env_or_prompt(args.password)
+        password = settings.encryption_password
         obfuscator = MetadataObfuscator()
     
     # Initialize change logger
@@ -245,7 +217,7 @@ def show_summary(change_logger: ChangeLogger):
     logger.info("Scanning for tables with change history...")
     
     # Find all change log files
-    changes_dir = Path("metadata/changes")
+    changes_dir = Path("metadata/encrypted/changes")
     
     if not changes_dir.exists():
         print("\nNo change logs found")

@@ -1,7 +1,7 @@
 """
 Change Logger
 Logs metadata changes to console and persistent log files
-Versioned files are kept in metadata/schemas and metadata/ddl folders
+Versioned files are kept in metadata/encrypted/schemas and metadata/encrypted/ddl folders
 """
 from datetime import datetime
 from pathlib import Path
@@ -24,10 +24,10 @@ class ChangeLogger:
         Initialize ChangeLogger
         
         Args:
-            log_dir: Directory for change log files (default: metadata/changes)
+            log_dir: Directory for change log files (default: metadata/encrypted/changes)
             obfuscator: Optional MetadataObfuscator instance for encryption
         """
-        self.log_dir = log_dir or Path("metadata/changes")
+        self.log_dir = log_dir or Path("metadata/encrypted/changes")
         self.obfuscator = obfuscator
         self._ensure_log_directory()
     

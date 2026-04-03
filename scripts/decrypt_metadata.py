@@ -4,7 +4,6 @@ Decrypt encrypted metadata files for human viewing
 """
 import argparse
 import sys
-import getpass
 from pathlib import Path
 
 # Add parent directory to path for imports
@@ -18,49 +17,26 @@ from pipeline.config.settings import get_settings
 logger = get_logger(__name__)
 
 
-def get_password_from_env_or_prompt(password_arg: str = None) -> str:
-    """
-    Get password from argument, .env file, or prompt
-    
-    Priority: command line argument > .env file > prompt
-    """
-    # Try command line argument first
-    if password_arg:
-        return password_arg
-    
-    # Try .env file
-    settings = get_settings()
-    if settings.encryption_password:
-        logger.info("Using encryption password from .env file")
-        return settings.encryption_password
-    
-    # Prompt for password
-    return getpass.getpass("Enter decryption password: ")
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="Decrypt encrypted metadata files for human viewing",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Decrypt all tables
-  python scripts/decrypt_metadata.py --all --password mypassword
-  
-  # Decrypt specific table
-  python scripts/decrypt_metadata.py --table FUND_SHARE_CLASS_BASIC_INFO --password mypassword
-  
-  # Prompt for password (secure)
+  # Decrypt all tables (uses ENCRYPTION_PASSWORD from .env)
   python scripts/decrypt_metadata.py --all
   
+  # Decrypt specific table
+  python scripts/decrypt_metadata.py --table FUND_SHARE_CLASS_BASIC_INFO
+  
   # List available tables
-  python scripts/decrypt_metadata.py --list --password mypassword
+  python scripts/decrypt_metadata.py --list
   
   # Clean up decrypted files
   python scripts/decrypt_metadata.py --clean
   
   # Decrypt and show change history
-  python scripts/decrypt_metadata.py --table FUND_SHARE_CLASS_BASIC_INFO --password mypassword --show-changes
+  python scripts/decrypt_metadata.py --table FUND_SHARE_CLASS_BASIC_INFO --show-changes
         """
     )
     
@@ -74,12 +50,6 @@ Examples:
         '--table',
         type=str,
         help='Decrypt specific table by name'
-    )
-    
-    parser.add_argument(
-        '--password',
-        type=str,
-        help='Decryption password (will prompt if not provided)'
     )
     
     parser.add_argument(
@@ -103,8 +73,8 @@ Examples:
     parser.add_argument(
         '--output-dir',
         type=str,
-        default='metadata/decrypted',
-        help='Custom output directory (default: metadata/decrypted)'
+        default='metadata/raw',
+        help='Custom output directory (default: metadata/raw)'
     )
     
     args = parser.parse_args()
@@ -118,10 +88,9 @@ Examples:
         clean_decrypted_files(args.output_dir)
         return 0
     
-    # Get password if needed
     password = None
     if not args.clean:
-        password = get_password_from_env_or_prompt(args.password)
+        password = get_settings().encryption_password
     
     # Initialize decryptor
     decrypted_dir = Path(args.output_dir)

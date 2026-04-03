@@ -4,6 +4,7 @@ Extracts table schemas and metadata from Snowflake and saves to local repository
 """
 import json
 import yaml
+import tempfile
 import pandas as pd
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
@@ -21,9 +22,9 @@ logger = get_logger(__name__)
 class SnowflakeMetadataExtractor:
     def __init__(self, obfuscator=None):
         self.settings = get_settings()
-        self.metadata_dir = Path("metadata/schemas")
+        self.metadata_dir = Path("metadata/encrypted/schemas")
         self.metadata_dir.mkdir(parents=True, exist_ok=True)
-        self.ddl_dir = Path("metadata/ddl")
+        self.ddl_dir = Path("metadata/encrypted/ddl")
         self.ddl_dir.mkdir(parents=True, exist_ok=True)
         self.comparator = MetadataComparator()
         self.change_logger = ChangeLogger(obfuscator=obfuscator)
@@ -130,10 +131,30 @@ class SnowflakeMetadataExtractor:
             cursor.execute(stats_query)
             stats = cursor.fetchone()
             
-            # Get primary key information
-            # Skipping primary key extraction for now
+            # Get primary key information from Snowflake
             primary_keys = []
-            logger.debug(f"Primary key extraction skipped for {database}.{schema}.{table}")
+            try:
+                pk_query = f"""
+                SELECT kcu.COLUMN_NAME
+                FROM {database}.INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+                JOIN {database}.INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
+                  ON tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+                  AND tc.TABLE_SCHEMA = kcu.TABLE_SCHEMA
+                  AND tc.TABLE_NAME = kcu.TABLE_NAME
+                WHERE tc.TABLE_SCHEMA = '{schema}'
+                  AND tc.TABLE_NAME = '{table}'
+                  AND tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
+                ORDER BY kcu.ORDINAL_POSITION
+                """
+                cursor.execute(pk_query)
+                pk_rows = cursor.fetchall()
+                primary_keys = [row[0] for row in pk_rows]
+                if primary_keys:
+                    logger.info(f"Found primary keys for {table}: {primary_keys}")
+                else:
+                    logger.debug(f"No primary key defined for {database}.{schema}.{table}")
+            except Exception as pk_err:
+                logger.debug(f"Could not query primary keys for {table}: {pk_err}")
             
             # Build metadata structure
             metadata = {
@@ -304,11 +325,13 @@ class SnowflakeMetadataExtractor:
             return None
         
         try:
-            # Decrypt to MEMORY (not disk)
-            decrypted_bytes = self.obfuscator.encryptor.decrypt_to_memory(encrypted_file, password)
-            
-            # Parse JSON from memory
-            old_metadata = json.loads(decrypted_bytes.decode('utf-8'))
+            with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
+                tmp_path = Path(tmp.name)
+            try:
+                self.obfuscator.encryptor.decrypt_file(encrypted_file, tmp_path, password)
+                old_metadata = json.loads(tmp_path.read_text(encoding="utf-8"))
+            finally:
+                tmp_path.unlink(missing_ok=True)
             
             # Compare metadata (all in memory)
             comparison = self.comparator.compare_metadata(old_metadata, new_metadata)
@@ -389,44 +412,22 @@ class SnowflakeMetadataExtractor:
         archived_metadata = None
         archived_ddl = None
         
-        # Archive metadata file
         current_metadata_file = self.metadata_dir / f"{current_metadata_id}.enc"
         if current_metadata_file.exists():
             try:
-                # Decrypt to memory
-                decrypted_bytes = self.obfuscator.encryptor.decrypt_to_memory(current_metadata_file, password)
-                
-                # Encrypt with new timestamped ID
                 archived_metadata = self.metadata_dir / f"{archived_metadata_id}.enc"
-                self.obfuscator.encryptor.encrypt_from_memory(decrypted_bytes, archived_metadata, password)
-                
-                # Delete old encrypted file
-                current_metadata_file.unlink()
-                
-                logger.info(f"Archived metadata: {current_metadata_id}.enc → {archived_metadata_id}.enc")
-                logger.info(f"  (Represents: {table_name}_metadata.json → {table_name}_metadata_{date_str}.json)")
-                
+                current_metadata_file.rename(archived_metadata)
+                logger.info(f"Archived metadata: {current_metadata_id}.enc -> {archived_metadata_id}.enc")
             except Exception as e:
                 logger.error(f"Failed to archive metadata for {table_name}: {e}")
                 archived_metadata = None
         
-        # Archive DDL file
         current_ddl_file = self.ddl_dir / f"{current_ddl_id}.enc"
         if current_ddl_file.exists():
             try:
-                # Decrypt to memory
-                decrypted_bytes = self.obfuscator.encryptor.decrypt_to_memory(current_ddl_file, password)
-                
-                # Encrypt with new timestamped ID
                 archived_ddl = self.ddl_dir / f"{archived_ddl_id}.enc"
-                self.obfuscator.encryptor.encrypt_from_memory(decrypted_bytes, archived_ddl, password)
-                
-                # Delete old encrypted file
-                current_ddl_file.unlink()
-                
-                logger.info(f"Archived DDL: {current_ddl_id}.enc → {archived_ddl_id}.enc")
-                logger.info(f"  (Represents: {table_name}_create.sql → {table_name}_create_{date_str}.sql)")
-                
+                current_ddl_file.rename(archived_ddl)
+                logger.info(f"Archived DDL: {current_ddl_id}.enc -> {archived_ddl_id}.enc")
             except Exception as e:
                 logger.error(f"Failed to archive DDL for {table_name}: {e}")
                 archived_ddl = None
@@ -531,19 +532,12 @@ class SnowflakeMetadataExtractor:
         metadata: Dict[str, Any], 
         postgres_schema: str, 
         postgres_table: str,
-        index_columns: List[str] = None
+        index_columns: List[str] = None,
+        merge_keys: List[str] = None,
     ) -> str:
         """
         Generate PostgreSQL CREATE TABLE DDL from metadata with optional indexes
-        
-        Args:
-            metadata: Table metadata from Snowflake
-            postgres_schema: Target PostgreSQL schema
-            postgres_table: Target PostgreSQL table name
-            index_columns: Optional list of columns to index
-            
-        Returns:
-            Complete DDL script with table and index creation
+        and UNIQUE constraint for merge/upsert keys.
         """
         if index_columns is None:
             index_columns = []
@@ -552,7 +546,8 @@ class SnowflakeMetadataExtractor:
             metadata,
             postgres_schema,
             postgres_table,
-            index_columns
+            index_columns,
+            merge_keys=merge_keys,
         )
     
     def save_postgres_ddl(self, ddl: str, table_name: str, password: Optional[str] = None) -> Path:
@@ -667,12 +662,14 @@ class SnowflakeMetadataExtractor:
                         logger.info(f"Skipping DDL generation for {table_name} (no changes detected)")
                         skip_ddl = True
                     
-                    # Generate PostgreSQL DDL with indexes
+                    # Generate PostgreSQL DDL with indexes and merge keys
+                    merge_keys = table_config.get("merge_keys", [])
                     ddl = self.generate_postgres_ddl(
                         metadata,
                         pg_config["schema"],
                         pg_config["table"],
-                        index_columns  # Pass index columns
+                        index_columns,
+                        merge_keys=merge_keys,
                     )
                     
                     # Save DDL to file

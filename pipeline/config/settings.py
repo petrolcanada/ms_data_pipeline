@@ -54,10 +54,24 @@ class Settings(BaseSettings):
     import_base_dir: str = Field("imports", env="IMPORT_BASE_DIR")
     chunk_size: int = Field(100000, env="CHUNK_SIZE")
     compression_type: str = Field("zstd", env="COMPRESSION_TYPE")
-    compression_level: int = Field(3, env="COMPRESSION_LEVEL")
+    compression_level: int = Field(9, env="COMPRESSION_LEVEL")
     encryption_iterations: int = Field(100000, env="KEY_DERIVATION_ITERATIONS")
-    encryption_password: Optional[str] = Field(None, env="ENCRYPTION_PASSWORD")  # Encryption password from .env
-    obfuscate_names: bool = Field(True, env="OBFUSCATE_NAMES")  # Enable name obfuscation by default
+    encryption_password: str = Field(..., env="ENCRYPTION_PASSWORD")
+    obfuscate_names: bool = Field(True, env="OBFUSCATE_NAMES")
+    obfuscation_salt: Optional[str] = Field(None, env="OBFUSCATION_SALT")
+    state_dir: str = Field("state", env="STATE_DIR")
+    
+    # Compression Optimization
+    sort_before_compress: bool = Field(True, env="SORT_BEFORE_COMPRESS")
+    use_dictionary_encoding: bool = Field(True, env="USE_DICTIONARY_ENCODING")
+    
+    # Git Delivery Settings
+    repo_mode: str = Field("single", env="REPO_MODE")
+    seed_repo_dir: str = Field("repos/seed", env="SEED_REPO_DIR")
+    delta_repo_dir: str = Field("repos/delta", env="DELTA_REPO_DIR")
+    seed_repo_url: Optional[str] = Field(None, env="SEED_REPO_URL")
+    delta_repo_url: Optional[str] = Field(None, env="DELTA_REPO_URL")
+    bundle_output_dir: str = Field("bundles", env="BUNDLE_OUTPUT_DIR")
     
     class Config:
         env_file = ".env"

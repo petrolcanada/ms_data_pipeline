@@ -1,243 +1,271 @@
-# Data Pipeline System
+# Morningstar Data Pipeline
 
-This repository contains a Python-based data management system for processing financial data from Snowflake to PostgreSQL.
+A metadata-driven ETL pipeline that extracts Morningstar financial data from Snowflake and loads it into PostgreSQL. Built for **air-gapped / split-network** workflows where the Snowflake source (VPN-side) and PostgreSQL target (external-side) cannot communicate directly.
 
 ## How It Works
 
-### 1. Configure Tables to Sync
-Edit `config/tables.yaml` to specify which Snowflake tables you want to sync:
+```
+ VPN Side                         Manual Transfer                  External Side
+┌──────────────────────┐        ┌──────────────────┐        ┌──────────────────────┐
+│  Snowflake           │        │                  │        │  PostgreSQL          │
+│                      │        │  metadata/       │        │                      │
+│  1. Extract metadata ├───────►│  config/         ├───────►│  4. Create tables    │
+│  2. Export data      │        │  exports/        │        │  5. Import data      │
+│     (encrypted       │        │  (Parquet files)  │        │     (decrypt +       │
+│      Parquet chunks) │        │                  │        │      upsert/COPY)    │
+└──────────────────────┘        └──────────────────┘        └──────────────────────┘
+```
+
+1. **Configure** which tables to sync in `config/tables.yaml` — including sync mode, merge keys, and watermarks
+2. **Extract metadata** — connect to Snowflake, discover schemas and primary keys, generate PostgreSQL DDL with UNIQUE constraints
+3. **Export data** — query Snowflake with filters and watermarks, write chunked Parquet files, encrypt with AES-GCM
+4. **Transfer** — manually copy `metadata/`, `config/`, and export directories to the PostgreSQL host
+5. **Create tables** — run generated DDL against PostgreSQL (supports ALTER TABLE for schema evolution)
+6. **Import data** — decrypt Parquet files and load via COPY/upsert into PostgreSQL
+
+## Quick Start
+
+```bash
+# 1. Configure tables (sync mode, merge keys, watermarks)
+#    Edit config/tables.yaml
+
+# 2. Extract metadata from Snowflake (VPN side)
+python scripts/extract_metadata.py --all
+
+# 3. Export data to encrypted Parquet (VPN side)
+python scripts/export_data.py --all
+
+# 4. Transfer files to PostgreSQL host (manual step)
+
+# 5. Create PostgreSQL tables (external side)
+python scripts/extract_metadata.py --all --create-postgres --drop-existing
+
+# 6. Import data into PostgreSQL (external side)
+python scripts/import_data.py --all
+```
+
+## Sync Modes
+
+Each table in `config/tables.yaml` supports one of three sync modes:
+
+| Mode | Behavior | Use Case |
+|------|----------|----------|
+| `full` | Truncate target table, then COPY all rows | Initial loads, reference data |
+| `incremental` | Append rows newer than the watermark | Append-only event tables |
+| `upsert` | INSERT ... ON CONFLICT DO UPDATE via staging table | Dimension tables with updates |
 
 ```yaml
 tables:
-  - name: "financial_data"
+  - name: "FUND_ATTRIBUTES_CA_OPENEND"
+    sync_mode: "upsert"
+    merge_keys: ["_ID"]
+    watermark_column: "_TIMESTAMPTO"
     snowflake:
       database: "PROD_DB"
-      schema: "PUBLIC" 
-      table: "FINANCIAL_DATA"
-      # Optional: Filter data during export
+      schema: "MORNINGSTAR_MAIN"
+      table: "FUND_ATTRIBUTES_CA_OPENEND"
       filter:
-        - "WHERE SECID IN (SELECT SECID FROM PUBLIC.VW_ACTIVE_FUNDS)"
-        - "AND _TIMESTAMPTO LIKE '%9999%'"
+        - "WHERE _ID IN (SELECT mstarid FROM ...)"
+        - "QUALIFY ROW_NUMBER() OVER (PARTITION BY _ID ORDER BY _TIMESTAMPTO DESC) = 1"
     postgres:
-      schema: "public"
-      table: "financial_data"
-    sync_mode: "full"
-    schedule: "daily"
-    encryption: true
-    compression: true
+      schema: "ms"
+      table: "FUND_ATTRIBUTES_CA_OPENEND"
+      indexes:
+        - "_ID"
+        - "_TIMESTAMPFROM"
+        - "_TIMESTAMPTO"
 ```
 
-**Filter Options:**
-- **No filter**: Omit the `filter` field to export all data
-- **Single filter**: `filter: "WHERE column = value"`
-- **Multiple filters**: Use a list to combine conditions with AND
-  ```yaml
-  filter:
-    - "WHERE id IN (SELECT id FROM view)"
-    - "AND status = 'ACTIVE'"
-    - "AND date > '2024-01-01'"
-  ```
+**Watermark tracking:** The pipeline stores the last exported watermark in `state/{table}_watermark.json`. On subsequent runs, only rows newer than the watermark are extracted from Snowflake. If no watermark exists, the first run performs a full extraction automatically.
 
-### 2. Extract Metadata from Snowflake (VPN Side)
-Run the metadata extraction script to connect to Snowflake and extract table schemas:
-
-```bash
-python scripts/extract_metadata.py --all
-```
-
-This will:
-- Connect to Snowflake (requires VPN access)
-- Extract table schemas, column types, constraints
-- Map Snowflake types to PostgreSQL equivalents
-- Save metadata to `metadata/schemas/{table}_metadata.json`
-- Generate PostgreSQL DDL and save to `metadata/ddl/{table}_create.sql`
-
-### 3. Create PostgreSQL Tables (External Side)
-The same script can also create the PostgreSQL tables:
-
-```bash
-python scripts/extract_metadata.py --all --create-postgres --drop-existing
-```
-
-This will:
-- Read the saved metadata files
-- Connect to PostgreSQL (external, no VPN needed)
-- Execute the DDL to create tables
-- Create appropriate indexes
-- Verify table structure matches Snowflake
-
-### 4. Repository Structure After Metadata Extraction
+## Project Structure
 
 ```
-financial-data-management/
+ms_data_pipeline/
 ├── config/
-│   └── tables.yaml                    # Your table configuration
+│   └── tables.yaml                          # Table sync config (source/target/filters/indexes/merge_keys)
+├── pipeline/
+│   ├── config/
+│   │   └── settings.py                      # Pydantic settings from .env
+│   ├── connections/
+│   │   ├── base_connection.py               # Abstract connection manager
+│   │   ├── snowflake_connection.py          # Snowflake connector (SSO/password/key-pair)
+│   │   └── postgres_connection.py           # PostgreSQL connector (psycopg2)
+│   ├── extractors/
+│   │   ├── metadata_extractor.py            # Schema + PK discovery, DDL generation from Snowflake
+│   │   └── data_extractor.py                # Chunked export with WHERE/QUALIFY/watermark filtering
+│   ├── loaders/
+│   │   ├── postgres_loader.py               # DDL execution, ALTER TABLE evolution, migration tracking
+│   │   └── data_loader.py                   # COPY FROM STDIN, upsert via staging table, chunk checkpoints
+│   ├── state/
+│   │   └── watermark_manager.py             # Watermark persistence for incremental sync
+│   ├── transformers/
+│   │   ├── encryptor.py                     # AES-GCM encryption with key versioning
+│   │   ├── obfuscator.py                    # Salted deterministic IDs, secure temp files
+│   │   └── type_optimizer.py                # DataFrame dtype optimization for smaller Parquet
+│   └── utils/
+│       ├── logger.py                        # Structured JSON logging + name sanitization filter
+│       ├── ddl_generator.py                 # CREATE TABLE / UNIQUE / INDEX / ALTER TABLE generation
+│       ├── metadata_comparator.py           # Schema diff with safe vs. breaking classification
+│       ├── change_logger.py                 # Persists schema change history
+│       ├── config_validator.py              # Validates index columns against metadata
+│       ├── content_hash_comparator.py       # SHA-256 skip-if-unchanged for export chunks
+│       ├── metadata_decryptor.py            # Decrypt metadata for local inspection
+│       ├── run_manifest.py                  # Post-run JSON summary for auditing
+│       ├── data_validator.py                # Optional per-column validation hooks
+│       ├── archive.py                       # Tar.gz archiving for single-file transport
+│       └── repo_manager.py                  # Git seed/delta repo management + bundle support
+├── scripts/
+│   ├── extract_metadata.py                  # CLI: metadata extraction + optional PG table creation
+│   ├── export_data.py                       # CLI: data export with watermark + sync mode support
+│   ├── import_data.py                       # CLI: decrypt + COPY/upsert into PostgreSQL with resume
+│   ├── create_tables.py                     # CLI: apply DDL from metadata
+│   ├── decrypt_metadata.py                  # CLI: decrypt metadata for viewing
+│   ├── view_change_history.py               # CLI: inspect schema change history
+│   └── compare_compression.py               # CLI: benchmark compression options
+├── state/                                   # Watermarks, import checkpoints, run manifests
 ├── metadata/
-│   ├── schemas/                       # Extracted metadata (JSON)
-│   │   ├── financial_data_metadata.json
-│   │   ├── market_prices_metadata.json
-│   │   └── company_info_metadata.json
-│   └── ddl/                          # Generated PostgreSQL DDL
-│       ├── financial_data_create.sql
-│       ├── market_prices_create.sql
-│       └── company_info_create.sql
-└── pipeline/
-    ├── extractors/
-    │   └── metadata_extractor.py     # Connects to Snowflake, extracts schemas
-    └── loaders/
-        └── postgres_loader.py        # Creates PostgreSQL tables from metadata
+│   ├── encrypted/                           # Git-tracked, used on PostgreSQL side
+│   │   ├── schemas/                         # Extracted table metadata (JSON/.enc)
+│   │   ├── ddl/                             # Generated PostgreSQL DDL (SQL/.enc)
+│   │   └── changes/                         # Schema change logs
+│   └── raw/                                 # NOT tracked — debugging/investigation
+├── docs/                                    # Reserved for future documentation
+├── environment.yml                          # Conda environment (Python 3.11)
+├── pyproject.toml                           # Project metadata and tool configuration
+└── .env                                     # Database credentials and settings (not committed)
 ```
 
-## Key Benefits
+## Key Features
 
-1. **Metadata-Driven**: Just specify table names, the system discovers schemas automatically
-2. **Type Mapping**: Automatically converts Snowflake types to PostgreSQL equivalents
-3. **Version Controlled**: All metadata and DDL saved in the repository
-4. **Cross-Network**: Metadata extraction on VPN side, table creation on external side
-5. **Verification**: Automatically verifies PostgreSQL tables match Snowflake schemas
-6. **Name Obfuscation**: Optional feature to randomize folder and file names for enhanced security
+### Initial Load vs. Incremental Sync
 
-## Example Workflow
+- **First run:** No watermark exists — pipeline performs a full extraction automatically
+- **Subsequent runs:** Watermark from last successful export is injected into the query (`WHERE _TIMESTAMPTO > :watermark`), extracting only new/changed rows
+- **Upsert on import:** Uses PostgreSQL `INSERT ... ON CONFLICT DO UPDATE` via a temporary staging table for atomic merge operations
+- **Full reload:** Set `sync_mode: "full"` or pass `--truncate` to truncate and reload from scratch
+
+### Schema Evolution
+
+The pipeline detects schema changes between extractions and can apply them non-destructively:
+
+- **Safe changes** (column additions, compatible type widening) are applied via `ALTER TABLE` automatically
+- **Breaking changes** (column removal, type narrowing) require explicit `--force` to apply
+- **Migration tracking:** All DDL changes are recorded in `{schema}._pipeline_migrations` for audit
+
+### Compression Optimization
+
+The pipeline applies multiple layers of compression tuning to minimize transfer size:
+
+| Technique | Impact | Default |
+|-----------|--------|---------|
+| **Pre-sort by merge/watermark keys** | 20-40% smaller Parquet (better RLE and dictionary encoding) | ON |
+| **Per-column dictionary encoding** | Auto-detected for low-cardinality string/category columns | ON |
+| **zstd level 9** | ~20% smaller than level 3, still fast enough for batch export | Level 9 |
+| **Type optimization** | Downcast ints, categorical conversion for low-cardinality strings | ON |
+| **Content-hash dedup** | Skip re-encrypting unchanged chunks | ON |
+
+Controlled via env vars (`SORT_BEFORE_COMPRESS`, `USE_DICTIONARY_ENCODING`, `COMPRESSION_LEVEL`) or CLI flags (`--no-sort`, `--no-dictionary`).
+
+### Git Delivery: Seed / Delta Repos
+
+For Git-based data delivery, the pipeline supports splitting exports across two repositories:
+
+```
+Producer (VPN side)                          Consumer (external side)
+┌──────────────────────────────┐             ┌──────────────────────────────┐
+│  repos/seed/                 │  git push   │  repos/seed/                 │
+│    TABLE_A/  (full load)     │────────────>│    TABLE_A/     git pull     │
+│                              │  (once)     │                              │
+│  repos/delta/                │  git push   │  repos/delta/                │
+│    TABLE_B/  (upsert delta)  │────────────>│    TABLE_B/     git pull     │
+└──────────────────────────────┘  (each run) └──────────────────────────────┘
+```
+
+- **Seed repo** — full-load tables; push once, consumer clones once
+- **Delta repo** — incremental/upsert data; push each cycle, consumer pulls
+- **Remotes** — configure `SEED_REPO_URL` / `DELTA_REPO_URL` pointing to GitHub, GitLab, or any Git server
+- **Git bundles** — alternative single `.bundle` files for fully air-gapped transfer
+- **Archives** — tar.gz per table for systems without Git
 
 ```bash
-# 1. Configure your tables
-vim config/tables.yaml
+# VPN side: export + commit + push to remote repos
+python scripts/export_data.py --all --repo-mode seed-delta --push
 
-# 2. Extract metadata from Snowflake (run on VPN side)
-python scripts/extract_metadata.py --all --check-changes
+# PSQL side: pull latest from remote repos + import
+python scripts/import_data.py --all --pull
 
-# 3. Export data (optionally with name obfuscation)
-python scripts/export_data.py --all --obfuscate
-
-# 4. Create PostgreSQL tables (can run on external side)
-python scripts/extract_metadata.py --all --create-postgres
-
-# 5. Import data
-python scripts/import_data.py --all
-
-# 6. Verify everything worked
-ls metadata/schemas/  # Check metadata files
-ls metadata/ddl/      # Check DDL files
+# Alternative: air-gapped transfer via git bundle
+python scripts/export_data.py --all --repo-mode seed-delta --bundle
+python scripts/import_data.py --all --from-bundle bundles/delta_20260402.bundle
 ```
 
-## Metadata Change Tracking
+### Performance
 
-Monitor table schema changes over time with automatic detection and alerting:
+- **PostgreSQL COPY:** Data loading uses `COPY FROM STDIN` via `copy_expert()` instead of row-by-row INSERT — typically 10-50x faster
+- **Incremental queries:** Watermark support avoids re-reading the entire table from Snowflake
+- **Content-hash deduplication:** Export skips re-encrypting chunks whose SHA-256 hash hasn't changed
 
-```bash
-# Check for metadata changes
-python scripts/extract_metadata.py --all --check-changes
-```
+### Security
 
-**What it tracks:**
-- Column additions/removals
-- Data type changes
-- NULL constraint changes
-- Column position changes
-- Constraint modifications
+- **AES-256-GCM encryption** with PBKDF2-HMAC-SHA256 key derivation (100k iterations)
+- **Salted deterministic IDs:** Obfuscated file/folder names mix in a secret `OBFUSCATION_SALT` so they're not reproducible without the secret
+- **Secure temp files:** Uses `tempfile.mkstemp()` with try/finally cleanup — no plaintext left on crash
+- **Log sanitization:** When obfuscation is enabled, real table names are replaced with IDs in INFO-level logs
+- **Static password:** Set `ENCRYPTION_PASSWORD` in `.env` — used by all scripts for encrypt/decrypt
 
-**When changes are detected:**
-- Displays detailed alert with all changes
-- Archives old metadata with timestamp: `{table}_{YYYYMMDD}_metadata.json`
-- Archives old DDL with timestamp: `{table}_{YYYYMMDD}_create.sql`
-- Logs changes to: `metadata/changes/{table}_changes.log`
-- Updates current files with new metadata
+### Resumable Imports
 
-**Example alert:**
-```
-⚠️  METADATA CHANGES DETECTED!
-Table: FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND
-Summary: 1 column added
+- **Chunk checkpoints:** Each successfully imported chunk is tracked in `state/{table}_import_checkpoint.json`
+- **Resume on failure:** Re-running import skips already-loaded chunks instead of re-inserting them
+- **Atomic upsert:** Staging table pattern ensures the real table is untouched if a merge fails
 
-Detailed Changes:
-  + Column added: RISK_RATING (VARCHAR(50))
+### Observability
 
-Archived old metadata:
-  • metadata/schemas/FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND_20241228_metadata.json
-  • metadata/ddl/FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND_20241228_create.sql
-```
+- **Run manifests:** After each export/import, a JSON summary is saved to `state/` — tables processed, row counts, durations, errors, watermarks advanced
+- **Structured logging:** Pass `structured=True` to `setup_logging()` for JSON-formatted log output
+- **Data validation hooks:** Optional per-column checks (not_null, null_rate_max, min_value) configurable in `tables.yaml`
 
-See [Metadata Change Tracking Guide](docs/metadata-change-tracking.md) for details.
+## Scripts Reference
 
-## Name Obfuscation (Optional Security Feature)
-
-For enhanced security, you can enable name obfuscation to randomize folder and file names:
-
-```bash
-# Export with obfuscated names
-python scripts/export_data.py --all --obfuscate
-```
-
-**What it does:**
-- Replaces table names with random IDs (e.g., `a7f3d9e2c4b8f1a9`)
-- Replaces file names with random IDs (e.g., `b4c8f1a9.enc`)
-- Creates encrypted master index (`.export_index.enc`)
-- Import automatically detects and handles obfuscated exports
-
-**Benefits:**
-- Casual observers cannot identify table names
-- File listings reveal no information about data structure
-- Adds extra security layer on top of encryption
-
-See [Name Obfuscation Guide](docs/name-obfuscation-guide.md) for details.
-
-## Next Steps
-
-After metadata extraction and table creation:
-1. Run the actual data pipeline to sync data
-2. Set up scheduling for regular syncs
-3. Monitor pipeline execution
-4. Use the REST API to access data
+| Script | Purpose | Example |
+|--------|---------|---------|
+| `extract_metadata.py` | Extract schemas + PKs from Snowflake, generate DDL, optionally create PG tables | `python scripts/extract_metadata.py --all --check-changes` |
+| `export_data.py` | Export data as encrypted Parquet chunks with watermark support | `python scripts/export_data.py --all --repo-mode seed-delta --bundle` |
+| `import_data.py` | Decrypt and load Parquet into PostgreSQL (COPY/upsert) with resume | `python scripts/import_data.py --all --from-bundle delta.bundle` |
+| `create_tables.py` | Apply DDL to PostgreSQL | `python scripts/create_tables.py --all` |
+| `decrypt_metadata.py` | Decrypt metadata for local viewing | `python scripts/decrypt_metadata.py` |
+| `view_change_history.py` | Inspect schema change history | `python scripts/view_change_history.py` |
+| `compare_compression.py` | Benchmark Parquet compression methods | `python scripts/compare_compression.py` |
 
 ## Environment Setup
 
 ### 1. Create Conda Environment
+
 ```bash
-# Create environment from file
 conda env create -f environment.yml
-
-# Or for development with extra tools
-conda env create -f environment-dev.yml
-
-# Activate environment
-conda activate data-pipeline-system
+conda activate ms-pipeline
 ```
 
-### 2. Alternative: Manual Environment Creation
+### 2. Install Runtime Dependencies
+
 ```bash
-# Create environment with Python version
-conda create -n financial-data-management python=3.11
-
-# Activate environment
-conda activate data-pipeline-system
-
-# Install dependencies
-conda env update -f environment.yml
+pip install snowflake-connector-python pandas pyarrow psycopg2-binary pydantic pydantic-settings pyyaml cryptography python-dotenv
 ```
 
-### 2. Configure Database Connections
-```bash
-# Copy environment template
-cp .env.example .env
+### 3. Configure Environment Variables
 
-# Edit .env with your actual credentials
-vim .env
-```
+Create a `.env` file in the project root:
 
-**Required Environment Variables for SSO:**
 ```bash
-# Snowflake Connection (VPN Side) - SSO Authentication
+# Snowflake Connection (VPN Side)
 SNOWFLAKE_USER=your_username
-SNOWFLAKE_ACCOUNT=your_account.region  # e.g., abc123.us-east-1
+SNOWFLAKE_ACCOUNT=your_account.region
 SNOWFLAKE_WAREHOUSE=your_warehouse
 SNOWFLAKE_DATABASE=PROD_DB
 SNOWFLAKE_SCHEMA=PUBLIC
-
-# Authentication method
-SNOWFLAKE_AUTH_METHOD=sso
-
-# Optional: Your SSO provider URL (if different from default)
-SNOWFLAKE_SSO_URL=https://your-company.okta.com
+SNOWFLAKE_ROLE=your_role
+SNOWFLAKE_AUTH_METHOD=sso              # sso | password | key_pair
 
 # PostgreSQL Connection (External Side)
 POSTGRES_HOST=your_postgres_host
@@ -245,82 +273,75 @@ POSTGRES_PORT=5432
 POSTGRES_DATABASE=financial_data
 POSTGRES_USER=your_pg_username
 POSTGRES_PASSWORD=your_pg_password
+
+# Security
+ENCRYPTION_PASSWORD=your_encryption_password
+OBFUSCATION_SALT=your_secret_salt      # Mixed into deterministic file/folder IDs
+API_SECRET_KEY=your_api_secret_key
+
+# Paths (defaults: exports / imports / state)
+# EXPORT_BASE_DIR=exports
+# IMPORT_BASE_DIR=imports
+# STATE_DIR=state
+
+# Compression optimization (defaults shown)
+# COMPRESSION_LEVEL=9                 # zstd 1-22, default 9
+# SORT_BEFORE_COMPRESS=true           # Pre-sort by merge keys for better encoding
+# USE_DICTIONARY_ENCODING=true        # Auto-detect low-cardinality dictionary columns
+
+# Git delivery
+# REPO_MODE=single                    # single | seed-delta
+# SEED_REPO_DIR=repos/seed
+# DELTA_REPO_DIR=repos/delta
+# SEED_REPO_URL=git@github.com:org/ms-data-seed.git
+# DELTA_REPO_URL=git@github.com:org/ms-data-delta.git
+# BUNDLE_OUTPUT_DIR=bundles
 ```
 
-**Alternative Authentication Methods:**
+### 4. Test Connections
+
 ```bash
-# For password authentication
-SNOWFLAKE_AUTH_METHOD=password
-SNOWFLAKE_PASSWORD=your_password
-
-# For key pair authentication
-SNOWFLAKE_AUTH_METHOD=key_pair
-SNOWFLAKE_PRIVATE_KEY_PATH=/path/to/private_key.p8
-SNOWFLAKE_PRIVATE_KEY_PASSPHRASE=your_passphrase  # Optional
-```
-
-### 3. Test Connections
-```bash
-# Ensure conda environment is activated
-conda activate data-pipeline-system
-
-# Test Snowflake SSO connection (requires VPN)
-# This will open a browser window for SSO authentication
+# Test Snowflake (requires VPN) — SSO will open a browser window
 python -c "from pipeline.extractors.metadata_extractor import SnowflakeMetadataExtractor; SnowflakeMetadataExtractor().connect_to_snowflake()"
 
-# Test PostgreSQL connection
+# Test PostgreSQL
 python -c "from pipeline.loaders.postgres_loader import PostgreSQLLoader; PostgreSQLLoader().connect_to_postgres()"
 ```
 
-**SSO Authentication Notes:**
-- When using SSO, the first connection will open your default browser
-- Complete the authentication in the browser window
-- The connection will be established after successful SSO login
-- Subsequent connections may use cached credentials (depending on your SSO setup)
+## Password Management
 
-## Conda Environment Management
+All scripts use the `ENCRYPTION_PASSWORD` value from `.env`. Set it once and all export, import, metadata, and DDL scripts will use it automatically.
 
-### **Environment Files:**
-- **`environment.yml`** - Production dependencies
-- **`environment-dev.yml`** - Development dependencies (includes testing, linting, Jupyter)
+## Troubleshooting
 
-### **Common Conda Commands:**
+| Problem | Solution |
+|---------|----------|
+| SSO prompt appears multiple times | Pass a connection manager — scripts reuse a single SSO session across all tables |
+| "Wrong password" on import | Ensure the password matches the one used during export; check `.env` |
+| "Table not found in config" | Add the table to `config/tables.yaml` first |
+| "Encrypted file not found" | Verify files were transferred from Snowflake server; folder names are obfuscated |
+| Zero rows exported | Test your filter in Snowflake directly; check WHERE/QUALIFY logic |
+| Schema change not detected | Run with `--force` to re-extract regardless of cache |
+| Git repo growing too large | Use `--orphan` for delta commits, or switch to tar archives |
+| Decrypted files accidentally committed | Run `python scripts/decrypt_metadata.py --clean`; they are in `.gitignore` |
+
+### Connection Tests
+
 ```bash
-# List environments
-conda env list
+# Test Snowflake (requires VPN)
+python -c "from pipeline.connections import SnowflakeConnectionManager; SnowflakeConnectionManager().connect()"
 
-# Update environment from file
-conda env update -f environment.yml
-
-# Export current environment
-conda env export > environment-backup.yml
-
-# Remove environment
-conda env remove -n data-pipeline-system
-
-# Install additional packages
-conda install package-name
-# or
-pip install package-name  # for packages not in conda
+# Test PostgreSQL
+python -c "from pipeline.connections import PostgresConnectionManager; PostgresConnectionManager().connect()"
 ```
 
-### **Development Tools Included:**
-- **Testing**: pytest, pytest-cov, pytest-asyncio
-- **Code Quality**: black, isort, flake8, mypy, pre-commit
-- **Documentation**: sphinx, sphinx-rtd-theme
-- **Data Exploration**: jupyter, matplotlib, seaborn
-- **Database Tools**: pgcli for PostgreSQL CLI
+## Git Tracking Strategy
 
-
-
-
-Metadata:
-snowflake export into the current repo in metadata folder including raw schema and ddl
-manual process to accessible in the psql server
-a process to loop through the ddl and create table if not exists
-
-actual data:
-initial load:
-data export from snowflake into a dedicated local file directory
-a manual process to move the files to the psql server
-psql server load the data into psql from a dedicated file directy on the psql server
+| File / Path | Tracked? | Reason |
+|-------------|----------|--------|
+| `config/tables.yaml` | Yes | Table sync configuration |
+| `metadata/encrypted/` | Yes | Encrypted, safe to commit |
+| `metadata/raw/` | **No** | Unencrypted, debugging only |
+| `exports/` / `imports/` | **No** | Too large; transfer separately |
+| `.env` | **No** | Contains secrets |
+| `state/` | Optional | Watermarks & checkpoints |

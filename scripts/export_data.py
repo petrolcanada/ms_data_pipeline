@@ -5,17 +5,17 @@ Extract data from Snowflake, compress, encrypt, and save for manual transfer
 
 Usage:
     python scripts/export_data.py --table financial_data
-    python scripts/export_data.py --table financial_data --password-file ~/.encryption_key
     python scripts/export_data.py --all
+    python scripts/export_data.py --all --archive
+    python scripts/export_data.py --all --repo-mode seed-delta --bundle
 """
 import sys
 import json
 import argparse
-import getpass
 import hashlib
 from pathlib import Path
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 from dataclasses import dataclass
 
 # Add project root to path
@@ -25,6 +25,7 @@ from pipeline.extractors.data_extractor import SnowflakeDataExtractor
 from pipeline.transformers.encryptor import FileEncryptor
 from pipeline.transformers.obfuscator import DataObfuscator
 from pipeline.connections import SnowflakeConnectionManager
+from pipeline.state.watermark_manager import WatermarkManager
 from pipeline.config.settings import get_settings
 from pipeline.utils.logger import get_logger
 import yaml
@@ -54,38 +55,6 @@ class ExportStatistics:
         return (self.chunks_unchanged / self.total_chunks) * 100
 
 
-def get_password(password_file: str = None, from_env: str = None) -> str:
-    """
-    Get encryption password from environment, file, or prompt
-    
-    Priority: password_file > from_env > prompt
-    """
-    # Try password file first
-    if password_file:
-        password_path = Path(password_file).expanduser()
-        if password_path.exists():
-            with open(password_path, 'r') as f:
-                password = f.read().strip()
-            logger.info(f"Password loaded from {password_file}")
-            return password
-        else:
-            logger.warning(f"Password file not found: {password_file}")
-    
-    # Try environment variable
-    if from_env:
-        logger.info("Using encryption password from .env")
-        return from_env
-    
-    # Prompt for password
-    password = getpass.getpass("Enter encryption password: ")
-    confirm = getpass.getpass("Confirm password: ")
-    
-    if password != confirm:
-        raise ValueError("Passwords do not match!")
-    
-    return password
-
-
 def export_table(
     table_config: dict,
     password: str,
@@ -94,8 +63,10 @@ def export_table(
     obfuscator: Optional[DataObfuscator] = None,
     chunk_size: int = 100000,
     compression: str = 'zstd',
-    compression_level: int = 3,
-    clean: bool = False
+    compression_level: int = 9,
+    clean: bool = False,
+    sort_before_compress: bool = True,
+    use_dictionary_encoding: bool = True,
 ):
     """
     Export a single table
@@ -110,20 +81,35 @@ def export_table(
         compression: Compression algorithm
         compression_level: Compression level
         clean: If True, delete existing export folder before starting
+        sort_before_compress: Sort data by merge/watermark keys before Parquet write
+        use_dictionary_encoding: Auto-detect and apply dictionary encoding
         
     Returns:
         Dictionary with export metadata including folder_id and manifest_file_id if obfuscated
     """
     table_name = table_config['name']
     sf_config = table_config['snowflake']
+    sync_mode = table_config.get('sync_mode', 'full')
+    watermark_column = table_config.get('watermark_column')
+    merge_keys = table_config.get('merge_keys', [])
+    
+    # Build sort columns: merge keys first, then watermark column.
+    # Sorting before Parquet write clusters similar values together,
+    # dramatically improving dictionary and RLE encoding.
+    sort_columns: Optional[List[str]] = None
+    if sort_before_compress:
+        sort_cols = list(merge_keys)
+        if watermark_column and watermark_column not in sort_cols:
+            sort_cols.append(watermark_column)
+        sort_columns = sort_cols if sort_cols else None
     
     # Check if obfuscation is enabled
     use_obfuscation = obfuscator is not None
     
     print("\n" + "=" * 70)
-    print(f"EXPORTING TABLE: {table_name}")
+    print(f"EXPORTING TABLE: {table_name}  [sync_mode={sync_mode}]")
     if use_obfuscation:
-        print("🔒 Name obfuscation: ENABLED")
+        print("  Name obfuscation: ENABLED")
     print("=" * 70)
     
     # Generate folder name (obfuscated or original)
@@ -165,11 +151,22 @@ def export_table(
     filter_config = sf_config.get('filter')
     filter_clause = extractor._build_filter_clause(filter_config)
     
+    # Inject watermark for incremental / upsert modes
+    watermark_mgr = WatermarkManager(state_dir=get_settings().state_dir)
+    watermark_value = None
+    if sync_mode in ("incremental", "upsert") and watermark_column:
+        watermark_value = watermark_mgr.get_watermark(table_name)
+        if watermark_value:
+            filter_clause = extractor.inject_watermark(filter_clause, watermark_column, watermark_value)
+            print(f"\n  Incremental watermark: {watermark_column} > '{watermark_value}'")
+        else:
+            print(f"\n  No watermark found - performing initial full extraction")
+    
     if filter_clause:
-        print(f"\n🔍 Filter: {filter_clause}")
+        print(f"\n  Filter: {filter_clause}")
         logger.info(f"Using filter: {filter_clause}")
     else:
-        print(f"\n📊 Extracting all data (no filter)")
+        print(f"\n  Extracting all data (no filter)")
     
     # Estimate table size (uses connection manager)
     print("\n🔄 Estimating table size...")
@@ -202,6 +199,7 @@ def export_table(
     chunks_metadata = []
     chunk_num = 0
     total_rows = 0
+    max_watermark_value = None
     
     for df_chunk in extractor.extract_table_chunks(
         sf_config['database'],
@@ -212,6 +210,16 @@ def export_table(
     ):
         chunk_num += 1
         total_rows += len(df_chunk)
+        
+        # Track max(watermark_column) from the actual data so the
+        # next run filters from exactly where the data left off,
+        # rather than relying on the export wall-clock time.
+        if watermark_column and watermark_column in df_chunk.columns:
+            chunk_max = df_chunk[watermark_column].dropna().max()
+            if chunk_max is not None:
+                chunk_max_str = str(chunk_max)
+                if max_watermark_value is None or chunk_max_str > max_watermark_value:
+                    max_watermark_value = chunk_max_str
         
         # Generate file name (obfuscated or original)
         if use_obfuscation:
@@ -231,7 +239,9 @@ def export_table(
             df_chunk,
             parquet_file,
             compression=compression,
-            compression_level=compression_level
+            compression_level=compression_level,
+            sort_columns=sort_columns,
+            use_dictionary_encoding=use_dictionary_encoding,
         )
         
         print(f"   Compressed: {parquet_info['size_mb']:.2f} MB")
@@ -435,8 +445,23 @@ def export_table(
     print(f"🔐 Encryption: AES-256-GCM with PBKDF2 ({encryptor.iterations:,} iterations)")
     if use_obfuscation:
         print(f"🔒 Names: Obfuscated (all files encrypted)")
-    print(f"⚠️  Remember your password - it's not stored anywhere!")
     print("=" * 70)
+    
+    # Update watermark on successful export — use the max value from the
+    # actual data (not the wall-clock export time) so the next run filters
+    # from exactly where the data left off.
+    if sync_mode in ("incremental", "upsert") and watermark_column and total_rows > 0:
+        effective_watermark = max_watermark_value or manifest["export_timestamp"]
+        watermark_mgr.update_watermark(
+            table_name,
+            effective_watermark,
+            rows_exported=total_rows,
+            export_timestamp=manifest["export_timestamp"],
+        )
+        if max_watermark_value:
+            print(f"\n  Watermark updated to max({watermark_column}) = {effective_watermark}")
+        else:
+            print(f"\n  Watermark updated to export timestamp = {effective_watermark} (column not found in data)")
     
     # Return export metadata
     return {
@@ -445,7 +470,8 @@ def export_table(
         "manifest_file_id": manifest_file_id,
         "export_timestamp": manifest["export_timestamp"],
         "total_rows": total_rows,
-        "total_chunks": chunk_num
+        "total_chunks": chunk_num,
+        "sync_mode": sync_mode,
     }
 
 
@@ -463,10 +489,6 @@ def main():
         help="Export all configured tables"
     )
     parser.add_argument(
-        "--password-file",
-        help="Path to file containing encryption password"
-    )
-    parser.add_argument(
         "--chunk-size",
         type=int,
         default=100000,
@@ -482,6 +504,44 @@ def main():
         action="store_true",
         help="Delete existing export folder before starting (useful for re-runs during testing)"
     )
+    # --- Compression optimization flags ---
+    parser.add_argument(
+        "--no-sort",
+        action="store_true",
+        help="Disable pre-sort optimization (sorting is enabled by default for better compression)"
+    )
+    parser.add_argument(
+        "--no-dictionary",
+        action="store_true",
+        help="Disable automatic dictionary encoding for low-cardinality columns"
+    )
+    # --- Delivery flags ---
+    parser.add_argument(
+        "--archive",
+        action="store_true",
+        help="Create a tar.gz archive per table for single-file transport"
+    )
+    parser.add_argument(
+        "--repo-mode",
+        choices=["single", "seed-delta"],
+        default=None,
+        help="Git repo topology: 'single' (default) or 'seed-delta' (full loads to seed repo, deltas to delta repo)"
+    )
+    parser.add_argument(
+        "--bundle",
+        action="store_true",
+        help="Create a git bundle for air-gapped transfer after committing"
+    )
+    parser.add_argument(
+        "--orphan",
+        action="store_true",
+        help="Use orphan branches for delta commits (no history accumulation)"
+    )
+    parser.add_argument(
+        "--push",
+        action="store_true",
+        help="Push seed/delta repos to their configured remote after committing (requires SEED_REPO_URL / DELTA_REPO_URL in .env)"
+    )
     
     args = parser.parse_args()
     
@@ -496,18 +556,22 @@ def main():
         
         # Get compression settings from environment
         compression_type = getattr(settings, 'compression_type', 'zstd')
-        compression_level = getattr(settings, 'compression_level', 3)
+        compression_level = getattr(settings, 'compression_level', 9)
+        
+        # Compression optimization
+        sort_before_compress = settings.sort_before_compress and not args.no_sort
+        use_dict_encoding = settings.use_dictionary_encoding and not args.no_dictionary
+        
+        # Repo mode: CLI flag > env > default
+        repo_mode = args.repo_mode or settings.repo_mode
         
         # Determine if obfuscation should be enabled
-        # Priority: --no-obfuscate flag > OBFUSCATE_NAMES env > default (True)
         if args.no_obfuscate:
             use_obfuscation = False
         else:
             use_obfuscation = getattr(settings, 'obfuscate_names', True)
         
-        # Get password (priority: --password-file > ENCRYPTION_PASSWORD env > prompt)
-        env_password = getattr(settings, 'encryption_password', None)
-        password = get_password(args.password_file, from_env=env_password)
+        password = settings.encryption_password
         
         # Load table configuration
         with open("config/tables.yaml", 'r') as f:
@@ -517,84 +581,225 @@ def main():
         obfuscator = None
         if use_obfuscation:
             obfuscator = DataObfuscator()
-            print("\n🔒 Name obfuscation: ENABLED")
+            print("\n  Name obfuscation: ENABLED")
             print("   Folder and file names will use deterministic IDs")
             print("   Same table + chunk = same file ID across runs")
             print("   No data hashing needed for ID generation")
         else:
-            print("\n📁 Name obfuscation: DISABLED")
+            print("\n  Name obfuscation: DISABLED")
             print("   Using original table names for folders")
         
+        # Print compression settings
+        print(f"\n  Compression: {compression_type} level {compression_level}")
+        print(f"  Pre-sort: {'ON' if sort_before_compress else 'OFF'}")
+        print(f"  Dictionary encoding: {'ON' if use_dict_encoding else 'OFF'}")
+        if repo_mode == "seed-delta":
+            print(f"  Repo mode: seed-delta (full->seed, incremental/upsert->delta)")
+        
+        # Initialize repo manager if needed
+        repo_manager = None
+        if repo_mode == "seed-delta":
+            from pipeline.utils.repo_manager import GitRepoManager
+            repo_manager = GitRepoManager(
+                seed_dir=settings.seed_repo_dir,
+                delta_dir=settings.delta_repo_dir,
+                seed_url=settings.seed_repo_url,
+                delta_url=settings.delta_repo_url,
+            )
+            repo_manager.init_repos()
+            print(f"  Seed repo: {settings.seed_repo_dir}")
+            print(f"  Delta repo: {settings.delta_repo_dir}")
+            if settings.seed_repo_url:
+                print(f"  Seed remote: {settings.seed_repo_url}")
+            if settings.delta_repo_url:
+                print(f"  Delta remote: {settings.delta_repo_url}")
+        
         # Create single Snowflake connection for all operations
-        print("\n🔐 Connecting to Snowflake...")
+        print("\n  Connecting to Snowflake...")
         with SnowflakeConnectionManager() as conn_manager:
-            print("✅ Connected to Snowflake (SSO authentication complete)")
+            print("  Connected to Snowflake (SSO authentication complete)")
             
-            # Export tables
+            export_results = []
+            
+            # Determine tables to export
             if args.table:
-                # Export single table
-                table_config = next(
-                    (t for t in config['tables'] if t['name'] == args.table),
-                    None
-                )
-                
-                if not table_config:
+                table_configs = [
+                    t for t in config['tables'] if t['name'] == args.table
+                ]
+                if not table_configs:
                     print(f"Error: Table '{args.table}' not found in config/tables.yaml")
                     sys.exit(1)
-                
-                export_result = export_table(
-                    table_config,
-                    password,
-                    export_base_dir,
-                    conn_manager,
-                    obfuscator=obfuscator,
-                    chunk_size=args.chunk_size,
-                    compression=compression_type,
-                    compression_level=compression_level,
-                    clean=args.clean
-                )
             else:
-                # Export all tables
+                table_configs = config['tables']
                 print(f"\n{'=' * 70}")
-                print(f"EXPORTING {len(config['tables'])} TABLES")
+                print(f"EXPORTING {len(table_configs)} TABLES")
                 print(f"{'=' * 70}")
-                
-                for table_config in config['tables']:
-                    try:
-                        export_result = export_table(
-                            table_config,
-                            password,
-                            export_base_dir,
-                            conn_manager,
-                            obfuscator=obfuscator,
-                            chunk_size=args.chunk_size,
-                            compression=compression_type,
-                            compression_level=compression_level,
-                            clean=args.clean
-                        )
-                    except Exception as e:
-                        logger.error(f"Failed to export {table_config['name']}: {e}")
-                        print(f"\n❌ Failed to export {table_config['name']}: {e}")
-                
+            
+            # Export each table
+            for table_config in table_configs:
+                try:
+                    export_result = export_table(
+                        table_config,
+                        password,
+                        export_base_dir,
+                        conn_manager,
+                        obfuscator=obfuscator,
+                        chunk_size=args.chunk_size,
+                        compression=compression_type,
+                        compression_level=compression_level,
+                        clean=args.clean,
+                        sort_before_compress=sort_before_compress,
+                        use_dictionary_encoding=use_dict_encoding,
+                    )
+                    export_results.append(export_result)
+                except Exception as e:
+                    logger.error(f"Failed to export {table_config['name']}: {e}")
+                    print(f"\n  Failed to export {table_config['name']}: {e}")
+            
+            if not args.table:
                 print(f"\n{'=' * 70}")
                 print("ALL EXPORTS COMPLETE")
                 print(f"{'=' * 70}")
         
         # Connection automatically closed when exiting context manager
-        print("\n✅ Snowflake connection closed")
+        print("\n  Snowflake connection closed")
         
-        print("\n📋 Next steps:")
-        print(f"1. Copy {export_base_dir}/ folder to PostgreSQL server")
-        if use_obfuscation:
-            print(f"   (Obfuscated folders use deterministic IDs - no index file needed)")
-        print(f"2. Run: python scripts/import_data.py --table {args.table or '<table_name>'}")
+        # --- Post-export: archive / repo / bundle ---
+        
+        # Archive each table export into a single tar.gz
+        if args.archive:
+            from pipeline.utils.archive import create_table_archive
+            print(f"\n{'=' * 70}")
+            print("CREATING ARCHIVES")
+            print(f"{'=' * 70}")
+            for result in export_results:
+                folder = result.get("folder_id") or result["table_name"]
+                table = result["table_name"]
+                archive_info = create_table_archive(
+                    Path(export_base_dir), folder, label=table,
+                )
+                print(f"  {table}: {archive_info['size_mb']:.2f} MB -> {archive_info['archive_path']}")
+        
+        # Stage into seed/delta repos and commit
+        if repo_manager and export_results:
+            print(f"\n{'=' * 70}")
+            print("STAGING TO GIT REPOS")
+            print(f"{'=' * 70}")
+            
+            seed_tables = []
+            delta_tables = []
+            
+            # Create orphan branch for deltas if requested
+            orphan_branch = None
+            if args.orphan:
+                orphan_branch = repo_manager.create_delta_orphan()
+                print(f"  Created orphan branch: {orphan_branch}")
+            
+            for result in export_results:
+                folder = result.get("folder_id") or result["table_name"]
+                table = result["table_name"]
+                mode = result.get("sync_mode", "full")
+                
+                source = Path(export_base_dir) / folder
+                if source.is_dir():
+                    repo_type = repo_manager.stage_table(source, table, sync_mode=mode)
+                    if repo_type == "seed":
+                        seed_tables.append(table)
+                    else:
+                        delta_tables.append(table)
+                    print(f"  {table} -> {repo_type} repo")
+            
+            timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+            
+            if seed_tables:
+                msg = f"seed {timestamp}: {', '.join(seed_tables)}"
+                sha = repo_manager.commit_seed(msg)
+                if sha:
+                    print(f"  Seed commit: {sha[:8]}")
+            
+            if delta_tables:
+                msg = f"delta {timestamp}: {', '.join(delta_tables)}"
+                sha = repo_manager.commit_delta(msg)
+                if sha:
+                    print(f"  Delta commit: {sha[:8]}")
+        
+        # Squash + push to remote repos.
+        # Squashing collapses all history into a single commit before
+        # pushing.  Encrypted files are random bytes that Git cannot
+        # delta-compress, so keeping history only wastes remote storage.
+        # Force-push replaces the remote branch with the single commit.
+        if args.push and repo_manager:
+            print(f"\n{'=' * 70}")
+            print("SQUASH + PUSH TO REMOTE REPOS")
+            print(f"{'=' * 70}")
+            
+            if seed_tables:
+                if settings.seed_repo_url:
+                    msg = f"seed {timestamp}: {', '.join(seed_tables)}"
+                    repo_manager.squash_history("seed", msg)
+                    print(f"  Seed: squashed to single commit")
+                    push_info = repo_manager.push("seed")
+                    print(f"  Seed pushed: {push_info['branch']} @ {push_info['head']}")
+                else:
+                    print("  Seed: no SEED_REPO_URL configured, skipping push")
+            
+            if delta_tables:
+                if settings.delta_repo_url:
+                    msg = f"delta {timestamp}: {', '.join(delta_tables)}"
+                    repo_manager.squash_history("delta", msg)
+                    print(f"  Delta: squashed to single commit")
+                    push_info = repo_manager.push("delta")
+                    print(f"  Delta pushed: {push_info['branch']} @ {push_info['head']}")
+                else:
+                    print("  Delta: no DELTA_REPO_URL configured, skipping push")
+        elif args.push and not repo_manager:
+            print("\n  --push requires --repo-mode seed-delta")
+        
+        # Create git bundles for offline transfer
+        if args.bundle and repo_manager:
+            print(f"\n{'=' * 70}")
+            print("CREATING GIT BUNDLES")
+            print(f"{'=' * 70}")
+            
+            bundle_dir = Path(settings.bundle_output_dir)
+            ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+            
+            if seed_tables:
+                bundle_info = repo_manager.create_bundle(
+                    "seed",
+                    bundle_dir / f"seed_{ts}.bundle",
+                )
+                print(f"  Seed bundle: {bundle_info['size_mb']:.2f} MB -> {bundle_info['bundle_path']}")
+            
+            if delta_tables:
+                bundle_info = repo_manager.create_bundle(
+                    "delta",
+                    bundle_dir / f"delta_{ts}.bundle",
+                )
+                print(f"  Delta bundle: {bundle_info['size_mb']:.2f} MB -> {bundle_info['bundle_path']}")
+        elif args.bundle and not repo_manager:
+            print("\n  --bundle requires --repo-mode seed-delta")
+        
+        # Next steps
+        print("\n  Next steps:")
+        if args.bundle:
+            print(f"1. Transfer .bundle file(s) from {settings.bundle_output_dir}/ to consumer")
+            print(f"2. Run: python scripts/import_data.py --from-bundle <path> --table <name>")
+        elif args.archive:
+            print(f"1. Transfer .tar.gz file(s) from {export_base_dir}/ to consumer")
+            print(f"2. Run: python scripts/import_data.py --from-archive <path> --table <name>")
+        else:
+            print(f"1. Copy {export_base_dir}/ folder to PostgreSQL server")
+            if use_obfuscation:
+                print(f"   (Obfuscated folders use deterministic IDs - no index file needed)")
+            print(f"2. Run: python scripts/import_data.py --table {args.table or '<table_name>'}")
         
     except KeyboardInterrupt:
         print("\n\nExport cancelled by user")
         sys.exit(1)
     except Exception as e:
         logger.error(f"Export failed: {e}")
-        print(f"\n❌ Export failed: {e}")
+        print(f"\n  Export failed: {e}")
         sys.exit(1)
 
 
