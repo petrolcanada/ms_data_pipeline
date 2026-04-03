@@ -3,6 +3,7 @@ Configuration Settings
 Loads environment variables and provides configuration for the application
 """
 import os
+from pathlib import Path
 from typing import Optional
 from pydantic import Field
 from pydantic_settings import BaseSettings
@@ -65,13 +66,25 @@ class Settings(BaseSettings):
     sort_before_compress: bool = Field(True, env="SORT_BEFORE_COMPRESS")
     use_dictionary_encoding: bool = Field(True, env="USE_DICTIONARY_ENCODING")
     
+    @property
+    def metadata_encrypted_dir(self) -> str:
+        return str(Path(self.export_base_dir) / "metadata" / "encrypted")
+
+    @property
+    def metadata_raw_dir(self) -> str:
+        return str(Path(self.export_base_dir) / "metadata" / "raw")
+
     # Git Delivery Settings
-    repo_mode: str = Field("single", env="REPO_MODE")
+    repo_mode: str = Field("single", env="REPO_MODE")  # single | repo
+    dataset_repo_dir: str = Field("repos/dataset", env="DATASET_REPO_DIR")
+    dataset_repo_url: Optional[str] = Field(None, env="DATASET_REPO_URL")
+    bundle_output_dir: str = Field("bundles", env="BUNDLE_OUTPUT_DIR")
+
+    # Legacy seed/delta fields (kept so existing .env files don't break)
     seed_repo_dir: str = Field("repos/seed", env="SEED_REPO_DIR")
     delta_repo_dir: str = Field("repos/delta", env="DELTA_REPO_DIR")
     seed_repo_url: Optional[str] = Field(None, env="SEED_REPO_URL")
     delta_repo_url: Optional[str] = Field(None, env="DELTA_REPO_URL")
-    bundle_output_dir: str = Field("bundles", env="BUNDLE_OUTPUT_DIR")
     
     class Config:
         env_file = ".env"

@@ -114,7 +114,7 @@ ms_data_pipeline/
 │       ├── run_manifest.py                  # Post-run JSON summary for auditing
 │       ├── data_validator.py                # Optional per-column validation hooks
 │       ├── archive.py                       # Tar.gz archiving for single-file transport
-│       └── repo_manager.py                  # Git seed/delta repo management + bundle support
+│       └── repo_manager.py                  # Disposable dataset repo management + bundle support
 ├── scripts/
 │   ├── extract_metadata.py                  # CLI: metadata extraction + optional PG table creation
 │   ├── export_data.py                       # CLI: data export with watermark + sync mode support
@@ -124,12 +124,6 @@ ms_data_pipeline/
 │   ├── view_change_history.py               # CLI: inspect schema change history
 │   └── compare_compression.py               # CLI: benchmark compression options
 ├── state/                                   # Watermarks, import checkpoints, run manifests
-├── metadata/
-│   ├── encrypted/                           # Git-tracked, used on PostgreSQL side
-│   │   ├── schemas/                         # Extracted table metadata (JSON/.enc)
-│   │   ├── ddl/                             # Generated PostgreSQL DDL (SQL/.enc)
-│   │   └── changes/                         # Schema change logs
-│   └── raw/                                 # NOT tracked — debugging/investigation
 ├── docs/                                    # Reserved for future documentation
 ├── environment.yml                          # Conda environment (Python 3.11)
 ├── pyproject.toml                           # Project metadata and tool configuration
@@ -143,7 +137,8 @@ ms_data_pipeline/
 - **First run:** No watermark exists — pipeline performs a full extraction automatically
 - **Subsequent runs:** Watermark from last successful export is injected into the query (`WHERE _TIMESTAMPTO > :watermark`), extracting only new/changed rows
 - **Upsert on import:** Uses PostgreSQL `INSERT ... ON CONFLICT DO UPDATE` via a temporary staging table for atomic merge operations
-- **Full reload:** Set `sync_mode: "full"` or pass `--truncate` to truncate and reload from scratch
+- **Full reload (export):** Pass `--full-reload` to ignore watermark state and re-extract all rows; the watermark is still updated after export so subsequent runs resume incrementally
+- **Full reload (import):** Pass `--truncate` to truncate the PostgreSQL table before loading
 
 ### Schema Evolution
 
@@ -167,38 +162,29 @@ The pipeline applies multiple layers of compression tuning to minimize transfer 
 
 Controlled via env vars (`SORT_BEFORE_COMPRESS`, `USE_DICTIONARY_ENCODING`, `COMPRESSION_LEVEL`) or CLI flags (`--no-sort`, `--no-dictionary`).
 
-### Git Delivery: Seed / Delta Repos
+### Git Delivery: Disposable Dataset Repo
 
-For Git-based data delivery, the pipeline supports splitting exports across two repositories:
+For Git-based data delivery, the pipeline uses a single disposable repository that is completely reset each run — no history is preserved. The repo acts as a fresh data delivery envelope.
 
 ```
 Producer (VPN side)                          Consumer (external side)
 ┌──────────────────────────────┐             ┌──────────────────────────────┐
-│  repos/seed/                 │  git push   │  repos/seed/                 │
-│    TABLE_A/  (full load)     │────────────>│    TABLE_A/     git pull     │
-│                              │  (once)     │                              │
-│  repos/delta/                │  git push   │  repos/delta/                │
-│    TABLE_B/  (upsert delta)  │────────────>│    TABLE_B/     git pull     │
-└──────────────────────────────┘  (each run) └──────────────────────────────┘
+│  repos/dataset/              │  force-push │  repos/dataset/              │
+│    delivery_manifest.json    │────────────>│    delivery_manifest.json    │
+│    TABLE_A/  (encrypted)     │  (each run) │    TABLE_A/   shallow clone  │
+│    TABLE_B/  (encrypted)     │             │    TABLE_B/                  │
+└──────────────────────────────┘             └──────────────────────────────┘
+         reset + commit                            clone --depth 1
 ```
 
-- **Seed repo** — full-load tables; push once, consumer clones once
-- **Delta repo** — incremental/upsert data; push each cycle, consumer pulls
-- **Remotes** — configure `SEED_REPO_URL` / `DELTA_REPO_URL` pointing to GitHub, GitLab, or any Git server
-- **Git bundles** — alternative single `.bundle` files for fully air-gapped transfer
+- **Reset each run** — the repo is nuked and re-created from scratch; no history accumulates
+- **Delivery manifest** — a JSON file embedded in the repo that tells the consumer exactly what to do (sync modes, merge keys, PostgreSQL targets, watermark state)
+- **Self-describing** — the consumer reads the manifest and auto-imports; no `tables.yaml` needed on the PSQL side
+- **Remote** — configure `DATASET_REPO_URL` pointing to GitHub, GitLab, or any Git server
+- **Git bundles** — alternative `.bundle` file for fully air-gapped transfer
 - **Archives** — tar.gz per table for systems without Git
 
-```bash
-# VPN side: export + commit + push to remote repos
-python scripts/export_data.py --all --repo-mode seed-delta --push
-
-# PSQL side: pull latest from remote repos + import
-python scripts/import_data.py --all --pull
-
-# Alternative: air-gapped transfer via git bundle
-python scripts/export_data.py --all --repo-mode seed-delta --bundle
-python scripts/import_data.py --all --from-bundle bundles/delta_20260402.bundle
-```
+See [CLI Reference](#cli-reference) for all delivery commands.
 
 ### Performance
 
@@ -226,17 +212,106 @@ python scripts/import_data.py --all --from-bundle bundles/delta_20260402.bundle
 - **Structured logging:** Pass `structured=True` to `setup_logging()` for JSON-formatted log output
 - **Data validation hooks:** Optional per-column checks (not_null, null_rate_max, min_value) configurable in `tables.yaml`
 
-## Scripts Reference
+## CLI Reference
 
-| Script | Purpose | Example |
-|--------|---------|---------|
-| `extract_metadata.py` | Extract schemas + PKs from Snowflake, generate DDL, optionally create PG tables | `python scripts/extract_metadata.py --all --check-changes` |
-| `export_data.py` | Export data as encrypted Parquet chunks with watermark support | `python scripts/export_data.py --all --repo-mode seed-delta --bundle` |
-| `import_data.py` | Decrypt and load Parquet into PostgreSQL (COPY/upsert) with resume | `python scripts/import_data.py --all --from-bundle delta.bundle` |
-| `create_tables.py` | Apply DDL to PostgreSQL | `python scripts/create_tables.py --all` |
-| `decrypt_metadata.py` | Decrypt metadata for local viewing | `python scripts/decrypt_metadata.py` |
-| `view_change_history.py` | Inspect schema change history | `python scripts/view_change_history.py` |
-| `compare_compression.py` | Benchmark Parquet compression methods | `python scripts/compare_compression.py` |
+### Export Data (`scripts/export_data.py`)
+
+```bash
+# Export all tables (incremental by default — uses watermark from state/)
+python scripts/export_data.py --all
+
+# Export a single table
+python scripts/export_data.py --table FUND_ATTRIBUTES_CA_OPENEND
+
+# Full reload — ignore watermark, pull all rows (watermark still updated after)
+python scripts/export_data.py --all --full-reload
+python scripts/export_data.py --table FUND_ATTRIBUTES_CA_OPENEND --full-reload
+
+# Clean — delete existing export folder before starting
+python scripts/export_data.py --all --clean
+
+# Disable name obfuscation (use real table names for folders/files)
+python scripts/export_data.py --all --no-obfuscate
+
+# Compression tuning
+python scripts/export_data.py --all --no-sort --no-dictionary
+
+# Skip repo staging (overrides REPO_MODE=repo in .env)
+python scripts/export_data.py --all --repo-mode single
+```
+
+#### Git Delivery
+
+```bash
+# Commit to dataset repo + push to remote
+python scripts/export_data.py --all --repo-mode repo --push
+
+# With custom purpose in commit message / manifest
+python scripts/export_data.py --all --repo-mode repo --push --purpose "Q1 refresh"
+
+# Air-gapped — create git bundle for offline transfer
+python scripts/export_data.py --all --repo-mode repo --bundle
+
+# Archive — tar.gz per table (no git required)
+python scripts/export_data.py --all --archive
+```
+
+### Import Data (`scripts/import_data.py`)
+
+```bash
+# Import all tables
+python scripts/import_data.py --all
+
+# Import a single table
+python scripts/import_data.py --table FUND_ATTRIBUTES_CA_OPENEND
+
+# Truncate + full reload into PostgreSQL
+python scripts/import_data.py --all --truncate
+
+# Pull from remote dataset repo + auto-import (reads delivery manifest)
+python scripts/import_data.py --pull
+
+# Pull + import specific table only
+python scripts/import_data.py --pull --table FUND_ATTRIBUTES_CA_OPENEND
+
+# Import from git bundle
+python scripts/import_data.py --all --from-bundle bundles/dataset_20260402.bundle
+
+# Import from archive
+python scripts/import_data.py --table TABLE --from-archive exports/TABLE.tar.gz
+
+# Keep decrypted Parquet files after import (for debugging)
+python scripts/import_data.py --all --keep-decrypted
+```
+
+### Metadata & Schema (`scripts/extract_metadata.py`)
+
+```bash
+# Extract metadata from Snowflake
+python scripts/extract_metadata.py --all
+
+# Check for schema changes since last extraction
+python scripts/extract_metadata.py --all --check-changes
+
+# Create PostgreSQL tables from metadata
+python scripts/extract_metadata.py --all --create-postgres --drop-existing
+```
+
+### Other Scripts
+
+```bash
+# Apply DDL to PostgreSQL
+python scripts/create_tables.py --all
+
+# Decrypt metadata for local viewing
+python scripts/decrypt_metadata.py
+
+# View schema change history
+python scripts/view_change_history.py
+
+# Benchmark compression options
+python scripts/compare_compression.py
+```
 
 ## Environment Setup
 
@@ -290,11 +365,9 @@ API_SECRET_KEY=your_api_secret_key
 # USE_DICTIONARY_ENCODING=true        # Auto-detect low-cardinality dictionary columns
 
 # Git delivery
-# REPO_MODE=single                    # single | seed-delta
-# SEED_REPO_DIR=repos/seed
-# DELTA_REPO_DIR=repos/delta
-# SEED_REPO_URL=git@github.com:org/ms-data-seed.git
-# DELTA_REPO_URL=git@github.com:org/ms-data-delta.git
+# REPO_MODE=single                    # single | repo
+# DATASET_REPO_DIR=repos/dataset
+# DATASET_REPO_URL=git@github.com:org/ms-dataset.git
 # BUNDLE_OUTPUT_DIR=bundles
 ```
 
@@ -322,7 +395,7 @@ All scripts use the `ENCRYPTION_PASSWORD` value from `.env`. Set it once and all
 | "Encrypted file not found" | Verify files were transferred from Snowflake server; folder names are obfuscated |
 | Zero rows exported | Test your filter in Snowflake directly; check WHERE/QUALIFY logic |
 | Schema change not detected | Run with `--force` to re-extract regardless of cache |
-| Git repo growing too large | Use `--orphan` for delta commits, or switch to tar archives |
+| Git repo growing too large | Repo is reset each run so this shouldn't happen; check `REPO_MODE=repo` |
 | Decrypted files accidentally committed | Run `python scripts/decrypt_metadata.py --clean`; they are in `.gitignore` |
 
 ### Connection Tests
@@ -337,11 +410,21 @@ python -c "from pipeline.connections import PostgresConnectionManager; PostgresC
 
 ## Git Tracking Strategy
 
+Metadata and data live together in the **data delivery folder** (`EXPORT_BASE_DIR`, a separate git repo). The pipeline code repo contains only code and configuration.
+
+### Pipeline Code Repo (`ms_data_pipeline`)
+
 | File / Path | Tracked? | Reason |
 |-------------|----------|--------|
 | `config/tables.yaml` | Yes | Table sync configuration |
-| `metadata/encrypted/` | Yes | Encrypted, safe to commit |
-| `metadata/raw/` | **No** | Unencrypted, debugging only |
-| `exports/` / `imports/` | **No** | Too large; transfer separately |
 | `.env` | **No** | Contains secrets |
 | `state/` | Optional | Watermarks & checkpoints |
+
+### Data Delivery Repo (`EXPORT_BASE_DIR` / `ms_dataset`)
+
+| File / Path | Tracked? | Reason |
+|-------------|----------|--------|
+| `metadata/encrypted/` | Yes | Encrypted schemas, DDL, change logs |
+| `metadata/raw/` | **No** | Decrypted copies for investigation |
+| `{table_folder}/*.enc` | Yes | Encrypted Parquet data chunks |
+| `*.parquet` | **No** | Unencrypted intermediates |

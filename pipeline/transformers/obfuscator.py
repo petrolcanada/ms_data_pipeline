@@ -183,7 +183,7 @@ class DataObfuscator:
             # Create master index structure
             master_index = {
                 "version": "1.0",
-                "created_at": datetime.utcnow().isoformat() + "Z",
+                "created_at": datetime.now().astimezone().isoformat(),
                 "obfuscation_enabled": True,
                 "tables": table_mappings
             }
@@ -350,7 +350,7 @@ class MetadataObfuscator(DataObfuscator):
             # Create master index structure
             master_index = {
                 "version": "1.0",
-                "created_at": datetime.utcnow().isoformat() + "Z",
+                "created_at": datetime.now().astimezone().isoformat(),
                 "obfuscation_enabled": True,
                 "type": "metadata",
                 "tables": table_mappings

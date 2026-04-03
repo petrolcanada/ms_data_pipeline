@@ -19,26 +19,33 @@ class ChangeLogger:
     Supports encryption when obfuscation is enabled
     """
     
-    def __init__(self, log_dir: Path = None, obfuscator=None):
+    def __init__(self, log_dir: Path = None, raw_log_dir: Path = None, obfuscator=None):
         """
         Initialize ChangeLogger
         
         Args:
-            log_dir: Directory for change log files (default: metadata/encrypted/changes)
+            log_dir: Directory for change log files (default: EXPORT_BASE_DIR/metadata/encrypted/changes)
+            raw_log_dir: Directory for raw (plaintext) change log copies (default: EXPORT_BASE_DIR/metadata/raw/changes)
             obfuscator: Optional MetadataObfuscator instance for encryption
         """
-        self.log_dir = log_dir or Path("metadata/encrypted/changes")
+        if log_dir is None or raw_log_dir is None:
+            from pipeline.config.settings import get_settings
+            settings = get_settings()
+            log_dir = log_dir or Path(settings.metadata_encrypted_dir) / "changes"
+            raw_log_dir = raw_log_dir or Path(settings.metadata_raw_dir) / "changes"
+        self.log_dir = log_dir
+        self.raw_log_dir = raw_log_dir
         self.obfuscator = obfuscator
         self._ensure_log_directory()
     
     def _ensure_log_directory(self):
-        """Create log directory if it doesn't exist"""
+        """Create log directories if they don't exist"""
         try:
             self.log_dir.mkdir(parents=True, exist_ok=True)
-            logger.debug(f"Change log directory ensured: {self.log_dir}")
+            self.raw_log_dir.mkdir(parents=True, exist_ok=True)
+            logger.debug(f"Change log directories ensured: {self.log_dir}, {self.raw_log_dir}")
         except Exception as e:
-            logger.error(f"Failed to create change log directory {self.log_dir}: {e}")
-            # Non-fatal - console logging will still work
+            logger.error(f"Failed to create change log directories: {e}")
     
     def log_change(
         self,
@@ -58,7 +65,7 @@ class ChangeLogger:
             archived_files: Dict with 'metadata' and 'ddl' archived file paths
             password: Encryption password (required if obfuscation enabled)
         """
-        timestamp = datetime.utcnow().isoformat() + "Z"
+        timestamp = datetime.now().astimezone().isoformat()
         
         # Log to console (existing behavior)
         logger.warning(f"[{timestamp}] Schema change detected for {table_name}")
@@ -147,58 +154,32 @@ class ChangeLogger:
         archived_files: Optional[Dict[str, Path]] = None,
         password: Optional[str] = None
     ):
-        """Write change entry to persistent log file (encrypted if obfuscation enabled)"""
+        """Write change entry: raw plaintext first, then encrypt to produce the encrypted copy."""
         try:
-            # Format the log entry
             entry = self.format_change_entry(timestamp, summary, changes, archived_files)
-            
+            raw_file = self.raw_log_dir / f"{table_name}_changes.log"
+
+            # Append to the raw (plaintext) log
+            with open(raw_file, 'a', encoding='utf-8') as f:
+                f.write(entry)
+                f.write("\n")
+            logger.debug(f"Change logged to raw file {raw_file}")
+
             if self.obfuscator and password:
-                # Encrypted mode: use deterministic file ID
                 file_id = self.obfuscator.generate_metadata_file_id(table_name, "changes")
-                log_file = self.log_dir / f"{file_id}.enc"
-                
-                # Read existing encrypted log if it exists
-                existing_content = ""
-                if log_file.exists():
-                    temp_decrypt = self.log_dir / f"{file_id}_temp.log"
-                    try:
-                        self.obfuscator.encryptor.decrypt_file(log_file, temp_decrypt, password)
-                        with open(temp_decrypt, 'r', encoding='utf-8') as f:
-                            existing_content = f.read()
-                        temp_decrypt.unlink()
-                    except Exception as e:
-                        logger.error(f"Failed to decrypt existing log for {table_name}: {e}")
-                        # Continue with empty content
-                
-                # Append new entry
-                full_content = existing_content + entry + "\n"
-                
-                # Write to temporary file
-                temp_log = self.log_dir / f"{file_id}.log.tmp"
-                with open(temp_log, 'w', encoding='utf-8') as f:
-                    f.write(full_content)
-                
-                # Encrypt the file
-                self.obfuscator.encryptor.encrypt_file(temp_log, log_file, password)
-                
-                # Remove temporary file
-                temp_log.unlink()
-                
-                logger.debug(f"Change logged to encrypted file {log_file}")
+                enc_file = self.log_dir / f"{file_id}.enc"
+                self.obfuscator.encryptor.encrypt_file(raw_file, enc_file, password)
+                logger.debug(f"Change logged to encrypted file {enc_file}")
             else:
-                # Non-encrypted mode: use table name
-                log_file = self.log_dir / f"{table_name}_changes.log"
-                
-                # Append to log file
-                with open(log_file, 'a', encoding='utf-8') as f:
-                    f.write(entry)
-                    f.write("\n")  # Extra newline for readability
-                
-                logger.debug(f"Change logged to {log_file}")
-            
+                enc_file = self.log_dir / f"{table_name}_changes.log"
+                with open(raw_file, 'r', encoding='utf-8') as src:
+                    content = src.read()
+                with open(enc_file, 'w', encoding='utf-8') as dst:
+                    dst.write(content)
+                logger.debug(f"Change logged to {enc_file}")
+
         except Exception as e:
             logger.error(f"Failed to write change log for {table_name}: {e}")
-            # Non-fatal - console logging already succeeded
     
     def format_change_entry(
         self,
@@ -310,7 +291,7 @@ class ChangeLogger:
             created_files: Dict with 'metadata' and 'ddl' created file paths
             password: Encryption password (required if obfuscation enabled)
         """
-        timestamp = datetime.utcnow().isoformat() + "Z"
+        timestamp = datetime.now().astimezone().isoformat()
         
         # Log to console (existing behavior)
         logger.info(f"[{timestamp}] Initial metadata extraction for {table_name}")
@@ -335,13 +316,13 @@ class ChangeLogger:
         created_files: Optional[Dict[str, Path]] = None,
         password: Optional[str] = None
     ):
-        """Write initial extraction entry to persistent log file (encrypted if obfuscation enabled)"""
+        """Write initial extraction entry: raw plaintext first, then encrypt."""
         try:
             lines = []
             lines.append(f"[{timestamp}] Initial metadata extraction")
             lines.append("")
             lines.append("Created Files:")
-            
+
             if created_files:
                 if created_files.get('metadata'):
                     lines.append(f"  - {created_files['metadata']}")
@@ -350,44 +331,34 @@ class ChangeLogger:
             else:
                 lines.append(f"  - {table_name}_metadata.json")
                 lines.append(f"  - {table_name}_create.sql")
-            
+
             lines.append("")
             lines.append("=" * 80)
-            
+
             entry = "\n".join(lines)
-            
+            raw_file = self.raw_log_dir / f"{table_name}_changes.log"
+
+            # Write to raw (plaintext) log
+            with open(raw_file, 'a', encoding='utf-8') as f:
+                f.write(entry)
+                f.write("\n")
+            logger.debug(f"Initial extraction logged to raw file {raw_file}")
+
             if self.obfuscator and password:
-                # Encrypted mode: use deterministic file ID
                 file_id = self.obfuscator.generate_metadata_file_id(table_name, "changes")
-                log_file = self.log_dir / f"{file_id}.enc"
-                
-                # Write to temporary file
-                temp_log = self.log_dir / f"{file_id}.log.tmp"
-                with open(temp_log, 'w', encoding='utf-8') as f:
-                    f.write(entry)
-                    f.write("\n")  # Extra newline for readability
-                
-                # Encrypt the file
-                self.obfuscator.encryptor.encrypt_file(temp_log, log_file, password)
-                
-                # Remove temporary file
-                temp_log.unlink()
-                
-                logger.debug(f"Initial extraction logged to encrypted file {log_file}")
+                enc_file = self.log_dir / f"{file_id}.enc"
+                self.obfuscator.encryptor.encrypt_file(raw_file, enc_file, password)
+                logger.debug(f"Initial extraction logged to encrypted file {enc_file}")
             else:
-                # Non-encrypted mode: use table name
-                log_file = self.log_dir / f"{table_name}_changes.log"
-                
-                # Append to log file
-                with open(log_file, 'a', encoding='utf-8') as f:
-                    f.write(entry)
-                    f.write("\n")  # Extra newline for readability
-                
-                logger.debug(f"Initial extraction logged to {log_file}")
-            
+                enc_file = self.log_dir / f"{table_name}_changes.log"
+                with open(raw_file, 'r', encoding='utf-8') as src:
+                    content = src.read()
+                with open(enc_file, 'w', encoding='utf-8') as dst:
+                    dst.write(content)
+                logger.debug(f"Initial extraction logged to {enc_file}")
+
         except Exception as e:
             logger.error(f"Failed to write initial extraction log for {table_name}: {e}")
-            # Non-fatal - console logging already succeeded
 
     
     def get_change_history(

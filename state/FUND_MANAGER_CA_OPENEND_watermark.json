@@ -1,0 +1,13 @@
+{
+  "table_name": "FUND_MANAGER_CA_OPENEND",
+  "watermark_value": "2026-04-03 05:05:30.199000+00:00",
+  "rows_exported": 234703,
+  "updated_at": "2026-04-03T23:00:29.570657Z",
+  "history": [
+    {
+      "watermark_value": "2026-04-03 05:05:30.199000+00:00",
+      "rows_exported": 234703,
+      "updated_at": "2026-04-03T22:04:02.647410Z"
+    }
+  ]
+}

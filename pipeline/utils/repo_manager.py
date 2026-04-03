@@ -1,27 +1,52 @@
 """
-Git Repo Manager
-Manages seed / delta repository topology for Git-based data delivery.
+Dataset Repo Manager
+Manages a single disposable Git repository for data delivery.
 
 Architecture:
-  - **Seed repo**  – contains initial full-load exports, cloned once by
-    the consumer and rarely updated afterwards.
-  - **Delta repo** – contains incremental / upsert exports that arrive
-    on each sync cycle.  Supports orphan branches to keep history light.
+  Every run completely resets the repository — no history is preserved.
+  The repo acts as a fresh data delivery envelope containing:
+  - Encrypted data files (Parquet chunks per table)
+  - A delivery manifest with everything the consumer needs to import
 
 Two transport modes:
-  1. **Remote push/pull** – push to a shared Git remote (GitHub, GitLab,
-     internal server) from the VPN side, pull on the PSQL side.
-  2. **Git bundles** – ``git bundle create`` for truly air-gapped transfer.
+  1. **Remote push/pull** — force-push to a shared Git remote from the
+     VPN side, shallow-clone on the PSQL side.
+  2. **Git bundles** — ``git bundle create`` for truly air-gapped transfer.
+
+Producer (VPN/Snowflake side)::
+
+    mgr = DatasetRepoManager("repos/dataset", "git@github.com:org/ms-data.git")
+    mgr.reset()
+    mgr.stage_table(Path("exports/abc123"), "abc123")
+    mgr.write_delivery_manifest(manifest, password="...")
+    mgr.commit("upsert: 14 tables [2026-04-03 14:30]")
+    mgr.push()
+
+Consumer (PostgreSQL side)::
+
+    mgr = DatasetRepoManager("repos/dataset", "git@github.com:org/ms-data.git")
+    mgr.pull()
+    manifest = mgr.read_delivery_manifest(password="...")
+    # manifest["tables"] has per-table sync_mode, merge_keys, postgres targets
 """
 import json
+import os
+import stat
 import subprocess
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 from pipeline.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _force_remove_readonly(func, path, exc_info):
+    """Handle read-only files on Windows (e.g. .git/objects/)."""
+    os.chmod(path, stat.S_IWRITE)
+    func(path)
 
 
 def _run_git(args: List[str], cwd: Path, check: bool = True) -> subprocess.CompletedProcess:
@@ -41,347 +66,232 @@ def _run_git(args: List[str], cwd: Path, check: bool = True) -> subprocess.Compl
     return result
 
 
-class GitRepoManager:
+class DatasetRepoManager:
     """
-    Manage seed and delta Git repositories for data delivery.
+    Manage a single disposable Git repository for data delivery.
 
-    **Producer (VPN side) — push workflow**::
+    Every run resets the repo completely — no history is preserved.
+    The repo is a fresh envelope containing encrypted data files and
+    a delivery manifest with import instructions.
 
-        mgr = GitRepoManager(
-            seed_dir="repos/seed", delta_dir="repos/delta",
-            seed_url="git@github.com:org/ms-data-seed.git",
-            delta_url="git@github.com:org/ms-data-delta.git",
-        )
-        mgr.init_repos()
-
-        mgr.stage_table("exports/TABLE_A", "TABLE_A", sync_mode="full")
-        mgr.commit_seed("seed 2026-04-02: TABLE_A")
-        mgr.push("seed")
-
-        mgr.stage_table("exports/TABLE_B", "TABLE_B", sync_mode="upsert")
-        mgr.commit_delta("delta 2026-04-02: TABLE_B")
-        mgr.push("delta")
-
-    **Consumer (PSQL side) — pull workflow**::
-
-        mgr = GitRepoManager(
-            seed_dir="repos/seed", delta_dir="repos/delta",
-            seed_url="git@github.com:org/ms-data-seed.git",
-            delta_url="git@github.com:org/ms-data-delta.git",
-        )
-        mgr.pull("seed")    # clone on first run, pull on subsequent
-        mgr.pull("delta")
-        # Then import from repos/seed/ and repos/delta/
+    The delivery manifest (``delivery_manifest.json`` or ``.enc``)
+    contains everything the consumer needs: per-table sync modes,
+    merge keys, PostgreSQL targets, and watermark state.
     """
 
-    def __init__(
-        self,
-        seed_dir: str = "repos/seed",
-        delta_dir: str = "repos/delta",
-        seed_url: Optional[str] = None,
-        delta_url: Optional[str] = None,
-    ):
-        self.seed_dir = Path(seed_dir)
-        self.delta_dir = Path(delta_dir)
-        self._urls: Dict[str, Optional[str]] = {
-            "seed": seed_url,
-            "delta": delta_url,
-        }
+    MANIFEST_PLAIN = "delivery_manifest.json"
+    MANIFEST_ENCRYPTED = "delivery_manifest.enc"
 
-    # ------------------------------------------------------------------ init
-    def init_repos(self):
-        """Ensure both seed and delta repos are initialised."""
-        self._init_repo(self.seed_dir)
-        self._init_repo(self.delta_dir)
+    def __init__(self, repo_dir: str, remote_url: Optional[str] = None):
+        self.repo_dir = Path(repo_dir)
+        self.remote_url = remote_url
 
-    def _init_repo(self, repo_dir: Path):
-        repo_dir.mkdir(parents=True, exist_ok=True)
-        git_dir = repo_dir / ".git"
-        if not git_dir.exists():
-            _run_git(["init"], cwd=repo_dir)
-            # Initial empty commit so branches work
-            _run_git(["commit", "--allow-empty", "-m", "init"], cwd=repo_dir)
-            logger.info(f"Initialised git repo: {repo_dir}")
-        else:
-            logger.debug(f"Repo already exists: {repo_dir}")
+    # ------------------------------------------------------------------ reset
+    def reset(self):
+        """
+        Nuke the repo entirely and ``git init`` fresh.
+
+        Removes all files (including ``.git``) so the next commit
+        has no parent — the repo starts completely empty.
+        """
+        if self.repo_dir.exists():
+            shutil.rmtree(str(self.repo_dir), onerror=_force_remove_readonly)
+            logger.info(f"Removed existing repo: {self.repo_dir}")
+
+        self.repo_dir.mkdir(parents=True, exist_ok=True)
+        _run_git(["init"], cwd=self.repo_dir)
+        logger.info(f"Initialised fresh repo: {self.repo_dir}")
 
     # --------------------------------------------------------------- staging
-    def stage_table(
-        self,
-        source_dir: Path,
-        table_name: str,
-        sync_mode: str = "full",
-    ) -> str:
+    def stage_table(self, source_dir: Path, dest_folder: str):
         """
-        Copy an export folder into the appropriate repo (seed or delta).
+        Copy a table's export folder into the repo.
 
         Args:
             source_dir: Path to the export folder (e.g. ``exports/<folder_id>``).
-            table_name: Logical table name (used for the subfolder inside the repo).
-            sync_mode: ``full`` routes to seed, everything else to delta.
-
-        Returns:
-            The repo type the table was staged into ('seed' or 'delta').
+            dest_folder: Folder name to use inside the repo.
         """
         source_dir = Path(source_dir)
         if not source_dir.is_dir():
             raise FileNotFoundError(f"Export directory not found: {source_dir}")
 
-        repo_type = "seed" if sync_mode == "full" else "delta"
-        repo_dir = self.seed_dir if repo_type == "seed" else self.delta_dir
-
-        # Ensure repo is initialised
-        self._init_repo(repo_dir)
-
-        dest = repo_dir / source_dir.name
+        dest = self.repo_dir / dest_folder
         if dest.exists():
             shutil.rmtree(str(dest))
         shutil.copytree(str(source_dir), str(dest))
+        logger.info(f"Staged {dest_folder} into dataset repo")
 
-        _run_git(["add", source_dir.name], cwd=repo_dir)
-        logger.info(f"Staged {table_name} ({source_dir.name}) into {repo_type} repo")
-        return repo_type
-
-    # -------------------------------------------------------------- committing
-    def commit_seed(self, message: str) -> Optional[str]:
-        """Commit staged changes in the seed repo."""
-        return self._commit(self.seed_dir, message)
-
-    def commit_delta(self, message: str, orphan_branch: Optional[str] = None) -> Optional[str]:
+    # ------------------------------------------------------------ manifest
+    def write_delivery_manifest(
+        self,
+        manifest: Dict[str, Any],
+        password: Optional[str] = None,
+    ):
         """
-        Commit staged changes in the delta repo.
+        Write the delivery manifest into the repo root.
 
-        If *orphan_branch* is given, the commit is placed on a new orphan
-        branch (no parent history), keeping the repo lightweight.
+        If *password* is provided the manifest is encrypted as
+        ``delivery_manifest.enc``; otherwise it is written as
+        plain ``delivery_manifest.json``.
+
+        The delivery manifest contains everything the consumer needs
+        to import the data: per-table sync modes, merge keys,
+        PostgreSQL targets, and watermark state.
         """
-        if orphan_branch:
-            self._create_orphan_branch(self.delta_dir, orphan_branch)
-        return self._commit(self.delta_dir, message)
+        manifest_json = json.dumps(manifest, indent=2, default=str)
 
-    def _repo_dir(self, repo_type: str) -> Path:
-        return self.seed_dir if repo_type == "seed" else self.delta_dir
+        if password:
+            from pipeline.transformers.encryptor import FileEncryptor
 
-    def _commit(self, repo_dir: Path, message: str) -> Optional[str]:
-        result = _run_git(["status", "--porcelain"], cwd=repo_dir)
+            temp_path = self.repo_dir / "_manifest_tmp.json"
+            temp_path.write_text(manifest_json, encoding="utf-8")
+
+            enc_path = self.repo_dir / self.MANIFEST_ENCRYPTED
+            encryptor = FileEncryptor()
+            encryptor.encrypt_file(temp_path, enc_path, password)
+            temp_path.unlink()
+
+            logger.info(f"Delivery manifest written (encrypted): {enc_path}")
+        else:
+            plain_path = self.repo_dir / self.MANIFEST_PLAIN
+            plain_path.write_text(manifest_json, encoding="utf-8")
+            logger.info(f"Delivery manifest written: {plain_path}")
+
+    def read_delivery_manifest(self, password: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Read and parse the delivery manifest from the repo.
+
+        Tries plain JSON first, then encrypted.
+        """
+        plain_path = self.repo_dir / self.MANIFEST_PLAIN
+        enc_path = self.repo_dir / self.MANIFEST_ENCRYPTED
+
+        if plain_path.exists():
+            with open(plain_path, "r", encoding="utf-8") as f:
+                manifest = json.load(f)
+            logger.info("Read delivery manifest (plain)")
+            return manifest
+
+        if enc_path.exists():
+            if not password:
+                raise ValueError(
+                    "Delivery manifest is encrypted but no password provided. "
+                    "Set ENCRYPTION_PASSWORD in .env"
+                )
+            from pipeline.transformers.encryptor import FileEncryptor
+            import os
+
+            encryptor = FileEncryptor()
+            fd, tmp_name = tempfile.mkstemp(suffix=".json")
+            temp_path = Path(tmp_name)
+            try:
+                os.close(fd)
+                encryptor.decrypt_file(enc_path, temp_path, password)
+                with open(temp_path, "r", encoding="utf-8") as f:
+                    manifest = json.load(f)
+            finally:
+                if temp_path.exists():
+                    temp_path.unlink()
+
+            logger.info("Read delivery manifest (encrypted)")
+            return manifest
+
+        raise FileNotFoundError(
+            f"Delivery manifest not found in {self.repo_dir}. "
+            f"Looked for: {self.MANIFEST_PLAIN}, {self.MANIFEST_ENCRYPTED}"
+        )
+
+    # ------------------------------------------------------------- committing
+    def commit(self, message: str) -> Optional[str]:
+        """
+        Stage all files and commit.
+
+        Returns the commit SHA, or None if nothing to commit.
+        """
+        result = _run_git(["status", "--porcelain"], cwd=self.repo_dir)
         if not result.stdout.strip():
             logger.info("Nothing to commit")
             return None
-        _run_git(["add", "."], cwd=repo_dir)
-        _run_git(["commit", "-m", message], cwd=repo_dir)
-        sha = _run_git(["rev-parse", "HEAD"], cwd=repo_dir).stdout.strip()
-        logger.info(f"Committed {sha[:8]} to {repo_dir.name}: {message}")
-        return sha
 
-    def squash_history(self, repo_type: str, message: str) -> Optional[str]:
-        """
-        Collapse all history into a single commit.
+        _run_git(["add", "."], cwd=self.repo_dir)
+        _run_git(["commit", "-m", message], cwd=self.repo_dir)
 
-        Encrypted Parquet files are random bytes that Git cannot
-        delta-compress, so keeping history only wastes space.  This
-        replaces the entire branch with one commit containing the
-        current tree, then runs ``gc`` to discard old objects.
-        """
-        repo_dir = self._repo_dir(repo_type)
-
-        _run_git(["add", "."], cwd=repo_dir)
-
-        result = _run_git(["status", "--porcelain"], cwd=repo_dir)
-        tree_empty = not any(
-            (repo_dir / p).exists()
-            for p in repo_dir.iterdir()
-            if p.name != ".git"
-        )
-        if tree_empty:
-            logger.info("Nothing to squash")
-            return None
-
-        # Create a new orphan branch, add everything, commit, then
-        # rename it back to the original branch.
-        branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_dir).stdout.strip()
-
-        _run_git(["checkout", "--orphan", "_squash_tmp"], cwd=repo_dir)
-        _run_git(["add", "."], cwd=repo_dir)
-        _run_git(["commit", "-m", message], cwd=repo_dir)
-
-        # Replace the original branch
-        _run_git(["branch", "-D", branch], cwd=repo_dir, check=False)
-        _run_git(["branch", "-m", branch], cwd=repo_dir)
-
-        # Discard unreachable objects
-        _run_git(["reflog", "expire", "--expire=now", "--all"], cwd=repo_dir, check=False)
-        _run_git(["gc", "--prune=now"], cwd=repo_dir, check=False)
-
-        sha = _run_git(["rev-parse", "HEAD"], cwd=repo_dir).stdout.strip()
-        logger.info(f"Squashed {repo_type} repo to single commit {sha[:8]}")
+        sha = _run_git(["rev-parse", "HEAD"], cwd=self.repo_dir).stdout.strip()
+        logger.info(f"Committed {sha[:8]}: {message}")
         return sha
 
     # --------------------------------------------------------- remote push/pull
-    def set_remote(self, repo_type: str, url: str, remote_name: str = "origin"):
-        """Configure the remote URL for a repo (idempotent)."""
-        repo_dir = self._repo_dir(repo_type)
-        self._urls[repo_type] = url
+    def push(self, remote_name: str = "origin", force: bool = True) -> Dict[str, Any]:
+        """
+        Force-push to the configured remote.
 
-        result = _run_git(["remote"], cwd=repo_dir)
+        Since the repo is reset each run, force-push is required
+        (the local history is always unrelated to the remote).
+        """
+        if not self.remote_url:
+            raise ValueError("No remote URL configured (set DATASET_REPO_URL in .env)")
+
+        result = _run_git(["remote"], cwd=self.repo_dir)
         remotes = result.stdout.strip().splitlines()
         if remote_name in remotes:
-            _run_git(["remote", "set-url", remote_name, url], cwd=repo_dir)
+            _run_git(["remote", "set-url", remote_name, self.remote_url], cwd=self.repo_dir)
         else:
-            _run_git(["remote", "add", remote_name, url], cwd=repo_dir)
-        logger.info(f"Set {repo_type} remote ({remote_name}) -> {url}")
+            _run_git(["remote", "add", remote_name, self.remote_url], cwd=self.repo_dir)
 
-    def push(self, repo_type: str, remote_name: str = "origin", force: bool = True) -> Dict[str, Any]:
-        """
-        Push the repo to its configured remote.
-
-        Defaults to ``--force`` because the pipeline squashes history
-        before each push — the remote should always match the single
-        local commit exactly.
-        """
-        repo_dir = self._repo_dir(repo_type)
-        url = self._urls.get(repo_type)
-
-        if url:
-            self.set_remote(repo_type, url, remote_name)
-
-        branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_dir).stdout.strip()
+        branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=self.repo_dir).stdout.strip()
 
         args = ["push", "-u", remote_name, branch]
         if force:
             args.insert(1, "--force")
 
-        _run_git(args, cwd=repo_dir)
+        _run_git(args, cwd=self.repo_dir)
 
-        sha = _run_git(["rev-parse", "--short", "HEAD"], cwd=repo_dir).stdout.strip()
-        logger.info(f"Pushed {repo_type} repo ({branch} @ {sha}) to {remote_name}")
+        sha = _run_git(["rev-parse", "--short", "HEAD"], cwd=self.repo_dir).stdout.strip()
+        logger.info(f"Pushed dataset repo ({branch} @ {sha}) to {remote_name}")
 
-        return {
-            "repo_type": repo_type,
-            "branch": branch,
-            "head": sha,
-            "remote": remote_name,
-        }
+        return {"branch": branch, "head": sha, "remote": remote_name}
 
-    def pull(self, repo_type: str, remote_name: str = "origin") -> Dict[str, Any]:
+    def pull(self, remote_name: str = "origin") -> Dict[str, Any]:
         """
-        Pull the latest data from the remote.
+        Pull the latest delivery from the remote.
 
-        If the local repo does not exist yet, clones with ``--depth 1``
-        (only the latest commit — no history).  Otherwise fetches the
-        latest commit and hard-resets to it so the local copy is an
-        exact mirror of the remote without accumulating history.
+        Since the producer resets the repo each run (new root commit
+        every time), the consumer also does a fresh shallow clone.
+        If a local copy exists it is deleted first.
         """
-        repo_dir = self._repo_dir(repo_type)
-        url = self._urls.get(repo_type)
+        if not self.remote_url:
+            raise ValueError("No remote URL configured (set DATASET_REPO_URL in .env)")
 
-        git_dir = repo_dir / ".git"
+        if self.repo_dir.exists():
+            shutil.rmtree(str(self.repo_dir), onerror=_force_remove_readonly)
+            logger.info(f"Removed existing local repo: {self.repo_dir}")
 
-        if not git_dir.exists():
-            if not url:
-                raise ValueError(
-                    f"No remote URL configured for {repo_type} repo and local "
-                    f"repo does not exist. Set {repo_type.upper()}_REPO_URL in .env"
-                )
-            return self.clone_from_remote(url, repo_dir)
-
-        if url:
-            self.set_remote(repo_type, url, remote_name)
-
-        # Fetch only the latest commit (--depth 1 keeps the local
-        # repo small even if the remote has history).
-        _run_git(["fetch", "--depth", "1", remote_name], cwd=repo_dir, check=False)
-
-        branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_dir).stdout.strip()
-        _run_git(["reset", "--hard", f"{remote_name}/{branch}"], cwd=repo_dir, check=False)
-
-        sha = _run_git(["rev-parse", "--short", "HEAD"], cwd=repo_dir).stdout.strip()
-        logger.info(f"Pulled {repo_type} repo: {branch} @ {sha}")
-
-        return {
-            "repo_type": repo_type,
-            "target_dir": str(repo_dir),
-            "branch": branch,
-            "head": sha,
-        }
-
-    @staticmethod
-    def clone_from_remote(url: str, target_dir: Path) -> Dict[str, Any]:
-        """Clone only the latest commit from a remote repo (``--depth 1``)."""
-        target_dir = Path(target_dir)
-        target_dir.parent.mkdir(parents=True, exist_ok=True)
-
-        _run_git(["clone", "--depth", "1", url, str(target_dir.resolve())], cwd=target_dir.parent)
-
-        sha = _run_git(["rev-parse", "--short", "HEAD"], cwd=target_dir).stdout.strip()
-        branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=target_dir).stdout.strip()
-        logger.info(f"Cloned {url} -> {target_dir} ({branch} @ {sha})")
-
-        return {
-            "target_dir": str(target_dir),
-            "branch": branch,
-            "head": sha,
-        }
-
-    # -------------------------------------------------------- orphan branches
-    def _create_orphan_branch(self, repo_dir: Path, branch_name: str):
-        _run_git(["checkout", "--orphan", branch_name], cwd=repo_dir)
-        # Remove index so only newly-added files appear
-        _run_git(["rm", "-rf", "--cached", "."], cwd=repo_dir, check=False)
-        logger.info(f"Created orphan branch: {branch_name}")
-
-    def create_delta_orphan(self, run_label: Optional[str] = None) -> str:
-        """
-        Create a timestamped orphan branch in the delta repo.
-
-        Returns:
-            Branch name that was created.
-        """
-        label = run_label or datetime.utcnow().strftime("run_%Y-%m-%d_%H%M%S")
-        self._create_orphan_branch(self.delta_dir, label)
-        return label
-
-    def cleanup_old_branches(self, repo_type: str = "delta", keep_latest: int = 5):
-        """
-        Delete old branches, keeping only the *keep_latest* most recent.
-
-        Reduces repo size on the producer side after bundles have been sent.
-        """
-        repo_dir = self.delta_dir if repo_type == "delta" else self.seed_dir
-        result = _run_git(
-            ["branch", "--sort=-committerdate", "--format=%(refname:short)"],
-            cwd=repo_dir,
+        self.repo_dir.parent.mkdir(parents=True, exist_ok=True)
+        _run_git(
+            ["clone", "--depth", "1", self.remote_url, str(self.repo_dir.resolve())],
+            cwd=self.repo_dir.parent,
         )
-        branches = [b.strip() for b in result.stdout.strip().splitlines() if b.strip()]
-        current = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_dir).stdout.strip()
 
-        to_delete = [b for b in branches if b != current][keep_latest:]
-        for branch in to_delete:
-            _run_git(["branch", "-D", branch], cwd=repo_dir, check=False)
-            logger.info(f"Deleted branch: {branch}")
-        return to_delete
+        sha = _run_git(["rev-parse", "--short", "HEAD"], cwd=self.repo_dir).stdout.strip()
+        branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=self.repo_dir).stdout.strip()
+        commit_msg = _run_git(["log", "-1", "--format=%s"], cwd=self.repo_dir).stdout.strip()
+
+        logger.info(f"Pulled dataset repo: {branch} @ {sha}")
+
+        return {
+            "target_dir": str(self.repo_dir),
+            "branch": branch,
+            "head": sha,
+            "commit_message": commit_msg,
+        }
 
     # ---------------------------------------------------------------- bundles
-    def create_bundle(
-        self,
-        repo_type: str,
-        output_path: Path,
-        ref: str = "HEAD",
-    ) -> Dict[str, Any]:
-        """
-        Create a ``git bundle`` for offline / air-gapped transfer.
-
-        Args:
-            repo_type: 'seed' or 'delta'.
-            output_path: Where to write the ``.bundle`` file.
-            ref: Git ref to bundle (default HEAD — the current branch tip).
-
-        Returns:
-            Dict with bundle path and size.
-        """
-        repo_dir = self.seed_dir if repo_type == "seed" else self.delta_dir
+    def create_bundle(self, output_path: Path, ref: str = "HEAD") -> Dict[str, Any]:
+        """Create a ``git bundle`` for air-gapped transfer."""
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        _run_git(["bundle", "create", str(output_path.resolve()), ref], cwd=repo_dir)
+        _run_git(["bundle", "create", str(output_path.resolve()), ref], cwd=self.repo_dir)
 
         size = output_path.stat().st_size
         logger.info(f"Created bundle: {output_path}  ({size / (1024*1024):.2f} MB)")
@@ -390,62 +300,15 @@ class GitRepoManager:
             "bundle_path": str(output_path),
             "size_bytes": size,
             "size_mb": size / (1024 * 1024),
-            "ref": ref,
-        }
-
-    def create_incremental_bundle(
-        self,
-        repo_type: str,
-        output_path: Path,
-        since_ref: str = "",
-    ) -> Dict[str, Any]:
-        """
-        Create an incremental bundle containing only objects added since *since_ref*.
-
-        If the consumer already has a previous bundle applied, they only
-        need the incremental part.
-
-        Args:
-            repo_type: 'seed' or 'delta'.
-            output_path: Where to write the bundle.
-            since_ref: Commit/tag the consumer already has (e.g. a tag you
-                       created after the last bundle).
-        """
-        repo_dir = self.seed_dir if repo_type == "seed" else self.delta_dir
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        ref_spec = f"{since_ref}..HEAD" if since_ref else "HEAD"
-        _run_git(["bundle", "create", str(output_path.resolve()), ref_spec], cwd=repo_dir)
-
-        size = output_path.stat().st_size
-        logger.info(f"Created incremental bundle: {output_path}  ({size / (1024*1024):.2f} MB)")
-        return {
-            "bundle_path": str(output_path),
-            "size_bytes": size,
-            "size_mb": size / (1024 * 1024),
-            "ref": ref_spec,
         }
 
     @staticmethod
-    def apply_bundle(
-        bundle_path: Path,
-        target_dir: Path,
-        remote_name: str = "origin",
-    ) -> Dict[str, Any]:
+    def apply_bundle(bundle_path: Path, target_dir: Path) -> Dict[str, Any]:
         """
         Apply a ``git bundle`` on the consumer side.
 
-        If *target_dir* is not yet a git repo, it will be cloned from the
-        bundle.  Otherwise the bundle is fetched as a remote and merged.
-
-        Args:
-            bundle_path: Path to the ``.bundle`` file.
-            target_dir: Where to clone / fetch into.
-            remote_name: Git remote name to register the bundle under.
-
-        Returns:
-            Dict with target dir, branch, and latest SHA.
+        Since each bundle represents a complete single-commit repo,
+        this always clones fresh from the bundle.
         """
         bundle_path = Path(bundle_path).resolve()
         target_dir = Path(target_dir)
@@ -453,109 +316,115 @@ class GitRepoManager:
         if not bundle_path.is_file():
             raise FileNotFoundError(f"Bundle not found: {bundle_path}")
 
-        git_dir = target_dir / ".git"
+        if target_dir.exists():
+            shutil.rmtree(str(target_dir), onerror=_force_remove_readonly)
 
-        if not git_dir.exists():
-            # Fresh clone from bundle
-            target_dir.mkdir(parents=True, exist_ok=True)
-            _run_git(
-                ["clone", str(bundle_path), str(target_dir.resolve())],
-                cwd=target_dir.parent,
-            )
-            logger.info(f"Cloned from bundle into {target_dir}")
-        else:
-            # Fetch into existing repo
-            # Check if remote exists
-            result = _run_git(["remote"], cwd=target_dir)
-            remotes = result.stdout.strip().splitlines()
-            if remote_name in remotes:
-                _run_git(["remote", "set-url", remote_name, str(bundle_path)], cwd=target_dir)
-            else:
-                _run_git(["remote", "add", remote_name, str(bundle_path)], cwd=target_dir)
-
-            _run_git(["fetch", remote_name], cwd=target_dir)
-
-            # Determine which branch to merge
-            bundle_refs = _run_git(["bundle", "list-heads", str(bundle_path)], cwd=target_dir)
-            branches = []
-            for line in bundle_refs.stdout.strip().splitlines():
-                parts = line.split()
-                if len(parts) >= 2:
-                    ref = parts[1]
-                    if ref.startswith("refs/heads/"):
-                        branches.append(ref.replace("refs/heads/", ""))
-
-            if branches:
-                target_branch = branches[0]
-                current = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=target_dir).stdout.strip()
-                if current != target_branch:
-                    _run_git(["checkout", target_branch], cwd=target_dir, check=False)
-                _run_git(["merge", f"{remote_name}/{target_branch}", "--ff-only"], cwd=target_dir, check=False)
-
-            logger.info(f"Applied bundle to {target_dir}")
+        target_dir.parent.mkdir(parents=True, exist_ok=True)
+        _run_git(
+            ["clone", str(bundle_path), str(target_dir.resolve())],
+            cwd=target_dir.parent,
+        )
 
         sha = _run_git(["rev-parse", "HEAD"], cwd=target_dir).stdout.strip()
         branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=target_dir).stdout.strip()
+
+        logger.info(f"Applied bundle to {target_dir}")
+
         return {
             "target_dir": str(target_dir),
             "branch": branch,
             "head_sha": sha,
         }
 
-    # ------------------------------------------------------------ tag helpers
-    def tag(self, repo_type: str, tag_name: str, message: str = ""):
-        """Create an annotated tag (useful as a baseline for incremental bundles)."""
-        repo_dir = self.seed_dir if repo_type == "seed" else self.delta_dir
-        args = ["tag"]
-        if message:
-            args += ["-a", tag_name, "-m", message]
-        else:
-            args.append(tag_name)
-        _run_git(args, cwd=repo_dir)
-        logger.info(f"Tagged {repo_type} repo: {tag_name}")
-
     # -------------------------------------------------------------- info / status
-    def status(self, repo_type: str = "both") -> Dict[str, Any]:
-        """Return a summary of repo state (current branch, last commit, size)."""
-        info: Dict[str, Any] = {}
-        repos = []
-        if repo_type in ("seed", "both"):
-            repos.append(("seed", self.seed_dir))
-        if repo_type in ("delta", "both"):
-            repos.append(("delta", self.delta_dir))
+    def status(self) -> Dict[str, Any]:
+        """Return a summary of the repo state."""
+        git_dir = self.repo_dir / ".git"
+        if not git_dir.exists():
+            return {"initialised": False, "path": str(self.repo_dir)}
 
-        for name, repo_dir in repos:
-            if not (repo_dir / ".git").exists():
-                info[name] = {"initialised": False}
-                continue
+        branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=self.repo_dir).stdout.strip()
+        sha = _run_git(["rev-parse", "--short", "HEAD"], cwd=self.repo_dir).stdout.strip()
+        log_line = _run_git(["log", "-1", "--format=%s (%ar)"], cwd=self.repo_dir).stdout.strip()
 
-            branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_dir).stdout.strip()
-            sha = _run_git(["rev-parse", "--short", "HEAD"], cwd=repo_dir).stdout.strip()
-            log_line = _run_git(["log", "-1", "--format=%s (%ar)"], cwd=repo_dir).stdout.strip()
+        has_manifest = (
+            (self.repo_dir / self.MANIFEST_PLAIN).exists()
+            or (self.repo_dir / self.MANIFEST_ENCRYPTED).exists()
+        )
 
-            # Count objects for rough size
-            count_result = _run_git(["count-objects", "-v"], cwd=repo_dir)
-            size_kb = 0
-            for line in count_result.stdout.splitlines():
-                if line.startswith("size-pack:"):
-                    size_kb = int(line.split(":")[1].strip())
+        count_result = _run_git(["count-objects", "-v"], cwd=self.repo_dir)
+        size_kb = 0
+        for line in count_result.stdout.splitlines():
+            if line.startswith("size-pack:"):
+                size_kb = int(line.split(":")[1].strip())
 
-            info[name] = {
-                "initialised": True,
-                "branch": branch,
-                "head": sha,
-                "last_commit": log_line,
-                "pack_size_mb": size_kb / 1024,
-            }
+        return {
+            "initialised": True,
+            "path": str(self.repo_dir),
+            "branch": branch,
+            "head": sha,
+            "last_commit": log_line,
+            "has_manifest": has_manifest,
+            "pack_size_mb": size_kb / 1024,
+        }
 
-        return info
 
-    def get_data_dir(self, table_folder: str, sync_mode: str) -> Optional[Path]:
-        """
-        Return the path inside the appropriate repo where a table's data lives.
+# ================================================================== helpers
+def build_delivery_manifest(
+    export_results: List[Dict[str, Any]],
+    table_configs: List[Dict[str, Any]],
+    run_purpose: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Build a delivery manifest from export results and table configs.
 
-        Useful for import_data.py to resolve import directories.
-        """
-        repo_dir = self.seed_dir if sync_mode == "full" else self.delta_dir
-        candidate = repo_dir / table_folder
-        return candidate if candidate.is_dir() else None
+    The manifest contains everything the consumer needs to import:
+    per-table sync modes, merge keys, PostgreSQL targets, watermark state.
+    """
+    timestamp = datetime.now().astimezone().isoformat()
+    run_id = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+    if not run_purpose:
+        run_purpose = _auto_purpose(export_results)
+
+    config_lookup = {tc["name"]: tc for tc in table_configs}
+
+    tables = []
+    for result in export_results:
+        name = result["table_name"]
+        tc = config_lookup.get(name, {})
+
+        tables.append({
+            "name": name,
+            "sync_mode": result.get("sync_mode", tc.get("sync_mode", "full")),
+            "merge_keys": tc.get("merge_keys", []),
+            "watermark_column": tc.get("watermark_column"),
+            "total_rows": result.get("total_rows", 0),
+            "total_chunks": result.get("total_chunks", 0),
+            "data_folder": result.get("folder_id") or name,
+            "postgres": tc.get("postgres", {}),
+        })
+
+    return {
+        "version": 1,
+        "run_id": run_id,
+        "run_timestamp": timestamp,
+        "run_purpose": run_purpose,
+        "tables": tables,
+    }
+
+
+def _auto_purpose(export_results: List[Dict[str, Any]]) -> str:
+    """Generate a human-readable run purpose from export results."""
+    modes: Dict[str, List[str]] = {}
+    for r in export_results:
+        mode = r.get("sync_mode", "full")
+        modes.setdefault(mode, []).append(r["table_name"])
+
+    parts = []
+    for mode, tables in sorted(modes.items()):
+        if len(tables) <= 3:
+            parts.append(f"{mode}: {', '.join(tables)}")
+        else:
+            parts.append(f"{mode}: {len(tables)} tables")
+    return "; ".join(parts)

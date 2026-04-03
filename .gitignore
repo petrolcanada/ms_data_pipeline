@@ -97,5 +97,5 @@ htmlcov/
 .dmypy.json
 dmypy.json
 
-# Raw metadata files (unencrypted, not tracked)
-metadata/raw/
+# Metadata now lives in the data delivery folder (EXPORT_BASE_DIR),
+# not in this code repo.  See ms_dataset/.gitignore for tracking rules.

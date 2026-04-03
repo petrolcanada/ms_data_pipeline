@@ -43,6 +43,7 @@ def create_table(table_name: str, drop_if_exists: bool = False, password: str = 
     print(f"Creating Table: {table_name}")
     print(f"{'=' * 70}")
     
+    settings = get_settings()
     loader = PostgreSQLLoader()
     encryptor = FileEncryptor()
     
@@ -51,9 +52,9 @@ def create_table(table_name: str, drop_if_exists: bool = False, password: str = 
     obfuscator = MetadataObfuscator()
     
     try:
-        # Check if files are encrypted (obfuscated)
-        metadata_dir = Path("metadata/encrypted/schemas")
-        ddl_dir = Path("metadata/encrypted/ddl")
+        encrypted_base = Path(settings.metadata_encrypted_dir)
+        metadata_dir = encrypted_base / "schemas"
+        ddl_dir = encrypted_base / "ddl"
         
         # Try to find unencrypted files first
         metadata_file = metadata_dir / f"{table_name}_metadata.json"
@@ -344,7 +345,7 @@ def main():
         settings = get_settings()
         password = settings.encryption_password
         
-        ddl_dir = Path("metadata/encrypted/ddl")
+        ddl_dir = Path(settings.metadata_encrypted_dir) / "ddl"
         encrypted_files = list(ddl_dir.glob("*.enc"))
         
         if encrypted_files:

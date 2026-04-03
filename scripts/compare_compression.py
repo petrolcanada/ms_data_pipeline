@@ -350,7 +350,7 @@ def main():
             with open(results_file, 'w') as f:
                 json.dump({
                     'table': args.table,
-                    'timestamp': datetime.utcnow().isoformat() + 'Z',
+                    'timestamp': datetime.now().astimezone().isoformat(),
                     'chunk_size': args.chunk_size,
                     'configurations': all_stats
                 }, f, indent=2)

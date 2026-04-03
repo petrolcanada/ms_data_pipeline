@@ -79,7 +79,7 @@ class ExportArchiver:
             meta = {
                 "source": source_dir.name,
                 "label": label,
-                "created_at": datetime.utcnow().isoformat() + "Z",
+                "created_at": datetime.now().astimezone().isoformat(),
                 "file_count": file_count,
             }
             import json

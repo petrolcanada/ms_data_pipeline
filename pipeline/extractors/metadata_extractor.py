@@ -22,13 +22,25 @@ logger = get_logger(__name__)
 class SnowflakeMetadataExtractor:
     def __init__(self, obfuscator=None):
         self.settings = get_settings()
-        self.metadata_dir = Path("metadata/encrypted/schemas")
+        encrypted_base = Path(self.settings.metadata_encrypted_dir)
+        self.metadata_dir = encrypted_base / "schemas"
         self.metadata_dir.mkdir(parents=True, exist_ok=True)
-        self.ddl_dir = Path("metadata/encrypted/ddl")
+        self.ddl_dir = encrypted_base / "ddl"
         self.ddl_dir.mkdir(parents=True, exist_ok=True)
+        raw_base = Path(self.settings.metadata_raw_dir)
+        self.raw_metadata_dir = raw_base / "schemas"
+        self.raw_metadata_dir.mkdir(parents=True, exist_ok=True)
+        self.raw_ddl_dir = raw_base / "ddl"
+        self.raw_ddl_dir.mkdir(parents=True, exist_ok=True)
         self.comparator = MetadataComparator()
-        self.change_logger = ChangeLogger(obfuscator=obfuscator)
-        self.obfuscator = obfuscator  # Optional MetadataObfuscator instance
+        self.raw_changes_dir = raw_base / "changes"
+        self.raw_changes_dir.mkdir(parents=True, exist_ok=True)
+        self.change_logger = ChangeLogger(
+            log_dir=encrypted_base / "changes",
+            raw_log_dir=self.raw_changes_dir,
+            obfuscator=obfuscator,
+        )
+        self.obfuscator = obfuscator
         
     def connect_to_snowflake(self):
         """
@@ -525,6 +537,12 @@ class SnowflakeMetadataExtractor:
             
             logger.info(f"Saved metadata to {metadata_file}")
         
+        # Always write a raw (human-readable) copy for investigation
+        raw_file = self.raw_metadata_dir / f"{table_name}_metadata.json"
+        with open(raw_file, 'w') as f:
+            json.dump(metadata, f, indent=2, default=str)
+        logger.info(f"Saved raw metadata to {raw_file}")
+        
         return metadata_file, comparison
     
     def generate_postgres_ddl(
@@ -592,9 +610,15 @@ class SnowflakeMetadataExtractor:
             
             logger.info(f"Saved DDL to {ddl_file}")
         
+        # Always write a raw (human-readable) copy for investigation
+        raw_ddl = self.raw_ddl_dir / f"{table_name}_create.sql"
+        with open(raw_ddl, 'w') as f:
+            f.write(ddl)
+        logger.info(f"Saved raw DDL to {raw_ddl}")
+        
         return ddl_file
     
-    def extract_all_configured_tables(self, check_changes: bool = False, force: bool = False, password: Optional[str] = None) -> Dict[str, Any]:
+    def extract_all_configured_tables(self, check_changes: bool = False, force: bool = False, password: Optional[str] = None, conn=None) -> Dict[str, Any]:
         """
         Extract metadata for all tables in config/tables.yaml
         
@@ -602,19 +626,20 @@ class SnowflakeMetadataExtractor:
             check_changes: Whether to check for metadata changes
             force: Force re-extraction even if no changes detected
             password: Encryption password (required if obfuscation enabled)
+            conn: Optional external Snowflake connection to reuse
             
         Returns:
             Dictionary with extraction results for each table
         """
-        # Load table configuration
         with open("config/tables.yaml", 'r') as f:
             config = yaml.safe_load(f)
         
         results = {}
         
-        # Create single Snowflake connection for all tables
-        logger.info("Establishing Snowflake connection for all tables...")
-        conn = self.connect_to_snowflake()
+        owns_connection = conn is None
+        if owns_connection:
+            logger.info("Establishing Snowflake connection for all tables...")
+            conn = self.connect_to_snowflake()
         
         try:
             for table_config in config["tables"]:
@@ -622,21 +647,18 @@ class SnowflakeMetadataExtractor:
                 sf_config = table_config["snowflake"]
                 pg_config = table_config["postgres"]
                 
-                # Get index columns from config (default to empty list)
                 index_columns = pg_config.get("indexes", [])
                 
                 try:
                     logger.info(f"Processing table: {table_name}")
                     
-                    # Extract metadata from Snowflake (reuse connection)
                     metadata = self.extract_table_metadata(
                         sf_config["database"],
                         sf_config["schema"],
                         sf_config["table"],
-                        conn=conn  # Pass existing connection
+                        conn=conn,
                     )
                     
-                    # Validate index configuration
                     if index_columns:
                         try:
                             validate_index_configuration(table_name, index_columns, metadata)
@@ -648,7 +670,6 @@ class SnowflakeMetadataExtractor:
                             }
                             continue
                     
-                    # Save metadata to file (with optional change checking)
                     metadata_file, comparison = self.save_metadata_to_file(
                         metadata, 
                         table_name, 
@@ -656,13 +677,11 @@ class SnowflakeMetadataExtractor:
                         password=password
                     )
                     
-                    # Determine if we should skip DDL generation
                     skip_ddl = False
                     if check_changes and comparison and not comparison["has_changes"] and not force:
                         logger.info(f"Skipping DDL generation for {table_name} (no changes detected)")
                         skip_ddl = True
                     
-                    # Generate PostgreSQL DDL with indexes and merge keys
                     merge_keys = table_config.get("merge_keys", [])
                     ddl = self.generate_postgres_ddl(
                         metadata,
@@ -672,7 +691,6 @@ class SnowflakeMetadataExtractor:
                         merge_keys=merge_keys,
                     )
                     
-                    # Save DDL to file
                     ddl_file = self.save_postgres_ddl(ddl, table_name, password=password)
                     
                     results[table_name] = {
@@ -694,9 +712,9 @@ class SnowflakeMetadataExtractor:
                         "error": str(e)
                     }
         finally:
-            # Close the shared connection
-            logger.info("Closing Snowflake connection")
-            conn.close()
+            if owns_connection:
+                logger.info("Closing Snowflake connection")
+                conn.close()
         
         return results
 

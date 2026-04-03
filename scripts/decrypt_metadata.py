@@ -73,8 +73,8 @@ Examples:
     parser.add_argument(
         '--output-dir',
         type=str,
-        default='metadata/raw',
-        help='Custom output directory (default: metadata/raw)'
+        default=None,
+        help='Custom output directory (default: EXPORT_BASE_DIR/metadata/raw)'
     )
     
     args = parser.parse_args()
@@ -83,17 +83,18 @@ Examples:
     if not any([args.all, args.table, args.list, args.clean]):
         parser.error("Must specify one of: --all, --table, --list, or --clean")
     
+    settings = get_settings()
+    
+    # Resolve output dir: CLI flag > settings default
+    output_dir = args.output_dir or settings.metadata_raw_dir
+    
     if args.clean:
-        # Clean up decrypted files
-        clean_decrypted_files(args.output_dir)
+        clean_decrypted_files(output_dir)
         return 0
     
-    password = None
-    if not args.clean:
-        password = get_settings().encryption_password
+    password = settings.encryption_password
     
-    # Initialize decryptor
-    decrypted_dir = Path(args.output_dir)
+    decrypted_dir = Path(output_dir)
     decryptor = MetadataDecryptor(decrypted_dir=decrypted_dir)
     
     # Ensure .gitignore is updated

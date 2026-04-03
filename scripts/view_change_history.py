@@ -217,7 +217,7 @@ def show_summary(change_logger: ChangeLogger):
     logger.info("Scanning for tables with change history...")
     
     # Find all change log files
-    changes_dir = Path("metadata/encrypted/changes")
+    changes_dir = Path(get_settings().metadata_encrypted_dir) / "changes"
     
     if not changes_dir.exists():
         print("\nNo change logs found")

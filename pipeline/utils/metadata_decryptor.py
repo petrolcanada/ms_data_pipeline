@@ -33,11 +33,16 @@ class MetadataDecryptor:
         Initialize MetadataDecryptor
         
         Args:
-            encrypted_dir: Directory containing encrypted metadata (default: metadata/encrypted/)
-            decrypted_dir: Directory for decrypted files (default: metadata/raw/)
+            encrypted_dir: Directory containing encrypted metadata (default: EXPORT_BASE_DIR/metadata/encrypted/)
+            decrypted_dir: Directory for decrypted files (default: EXPORT_BASE_DIR/metadata/raw/)
         """
-        self.encrypted_dir = encrypted_dir or Path("metadata/encrypted")
-        self.decrypted_dir = decrypted_dir or Path("metadata/raw")
+        if encrypted_dir is None or decrypted_dir is None:
+            from pipeline.config.settings import get_settings
+            settings = get_settings()
+            encrypted_dir = encrypted_dir or Path(settings.metadata_encrypted_dir)
+            decrypted_dir = decrypted_dir or Path(settings.metadata_raw_dir)
+        self.encrypted_dir = Path(encrypted_dir)
+        self.decrypted_dir = Path(decrypted_dir)
         
         self.encrypted_schemas_dir = self.encrypted_dir / "schemas"
         self.encrypted_ddl_dir = self.encrypted_dir / "ddl"
@@ -257,34 +262,33 @@ class MetadataDecryptor:
     
     def ensure_gitignore(self) -> None:
         """
-        Ensure decrypted directory is in .gitignore
-        
-        Adds 'metadata/raw/' to .gitignore if not already present
+        Ensure decrypted directory is excluded from Git in the delivery repo.
+
+        Looks for the .gitignore that lives alongside the metadata
+        (i.e. in EXPORT_BASE_DIR) rather than the CWD.
         """
-        gitignore_path = Path(".gitignore")
+        delivery_root = self.encrypted_dir.parent.parent
+        gitignore_path = delivery_root / ".gitignore"
         decrypted_pattern = "metadata/raw/"
-        
-        # Read existing .gitignore
+
         existing_lines = []
         if gitignore_path.exists():
             with open(gitignore_path, 'r') as f:
                 existing_lines = f.read().splitlines()
-        
-        # Check if pattern already exists
+
         if decrypted_pattern in existing_lines:
-            logger.debug(f"'{decrypted_pattern}' already in .gitignore")
+            logger.debug(f"'{decrypted_pattern}' already in {gitignore_path}")
             return
-        
-        # Add pattern
+
         try:
             with open(gitignore_path, 'a') as f:
-                if existing_lines and not existing_lines[-1].strip() == '':
-                    f.write('\n')  # Add newline if file doesn't end with one
+                if existing_lines and existing_lines[-1].strip() != '':
+                    f.write('\n')
                 f.write(f"\n# Raw metadata files (unencrypted, not tracked)\n")
                 f.write(f"{decrypted_pattern}\n")
-            
-            logger.info(f"✅ Added '{decrypted_pattern}' to .gitignore")
-            
+
+            logger.info(f"Added '{decrypted_pattern}' to {gitignore_path}")
+
         except Exception as e:
             logger.error(f"Failed to update .gitignore: {e}")
             raise

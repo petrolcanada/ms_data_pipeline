@@ -22,8 +22,9 @@ MIGRATION_TABLE = "_pipeline_migrations"
 class PostgreSQLLoader:
     def __init__(self):
         self.settings = get_settings()
-        self.metadata_dir = Path("metadata/encrypted/schemas")
-        self.ddl_dir = Path("metadata/encrypted/ddl")
+        encrypted_base = Path(self.settings.metadata_encrypted_dir)
+        self.metadata_dir = encrypted_base / "schemas"
+        self.ddl_dir = encrypted_base / "ddl"
 
     def connect_to_postgres(self):
         try:

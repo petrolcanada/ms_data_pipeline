@@ -54,7 +54,7 @@ class WatermarkManager:
             "table_name": table_name,
             "watermark_value": watermark_value,
             "rows_exported": rows_exported,
-            "updated_at": export_timestamp or datetime.utcnow().isoformat() + "Z",
+            "updated_at": export_timestamp or datetime.now().astimezone().isoformat(),
             "history": [],
         }
 

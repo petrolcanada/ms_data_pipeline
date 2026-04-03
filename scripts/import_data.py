@@ -45,16 +45,18 @@ def _resolve_import_dir(table_name: str, search_dirs) -> tuple:
     for base in search_dirs:
         base_path = Path(base)
 
-        plain = base_path / table_name
-        if plain.exists():
-            return plain, False
+        # Search data/encrypted/ first, then root level (legacy)
+        for sub in [base_path / "data" / "encrypted", base_path]:
+            plain = sub / table_name
+            if plain.exists():
+                return plain, False
 
-        obfuscated = base_path / folder_id
-        if obfuscated.exists():
-            return obfuscated, True
+            obfuscated = sub / folder_id
+            if obfuscated.exists():
+                return obfuscated, True
 
-        tried.append(str(plain))
-        tried.append(str(obfuscated))
+            tried.append(str(plain))
+            tried.append(str(obfuscated))
 
     raise FileNotFoundError(
         f"Import directory not found for table: {table_name}\n"
@@ -224,45 +226,26 @@ def _load_manifest(import_dir: Path, table_name: str, password: str, obfuscated:
     raise FileNotFoundError(f"Encrypted manifest not found for table: {table_name}")
 
 
-def _prepare_from_pull(pull_target: str, settings) -> list:
+def _prepare_from_pull(settings):
     """
-    Pull from remote seed/delta repos.
+    Pull from the remote dataset repo.
 
-    Returns a list of directories to search for table data.
+    Returns the DatasetRepoManager instance (caller reads the
+    delivery manifest from it).
     """
-    from pipeline.utils.repo_manager import GitRepoManager
+    from pipeline.utils.repo_manager import DatasetRepoManager
 
-    mgr = GitRepoManager(
-        seed_dir=settings.seed_repo_dir,
-        delta_dir=settings.delta_repo_dir,
-        seed_url=settings.seed_repo_url,
-        delta_url=settings.delta_repo_url,
+    mgr = DatasetRepoManager(
+        repo_dir=settings.dataset_repo_dir,
+        remote_url=settings.dataset_repo_url,
     )
 
-    pulled_dirs = []
+    print(f"\n  Pulling dataset repo from {settings.dataset_repo_url} ...")
+    info = mgr.pull()
+    print(f"  Ready: {info['branch']} @ {info['head']}")
+    print(f"  Purpose: {info['commit_message']}")
 
-    if pull_target in ("seed", "both") and settings.seed_repo_url:
-        print(f"\n  Pulling seed repo from {settings.seed_repo_url} ...")
-        info = mgr.pull("seed")
-        print(f"  Seed ready: {info['branch']} @ {info['head']}")
-        pulled_dirs.append(settings.seed_repo_dir)
-    elif pull_target in ("seed", "both"):
-        print("  Seed: no SEED_REPO_URL configured, skipping")
-
-    if pull_target in ("delta", "both") and settings.delta_repo_url:
-        print(f"\n  Pulling delta repo from {settings.delta_repo_url} ...")
-        info = mgr.pull("delta")
-        print(f"  Delta ready: {info['branch']} @ {info['head']}")
-        pulled_dirs.append(settings.delta_repo_dir)
-    elif pull_target in ("delta", "both"):
-        print("  Delta: no DELTA_REPO_URL configured, skipping")
-
-    if not pulled_dirs:
-        raise ValueError(
-            "No repos pulled. Set SEED_REPO_URL and/or DELTA_REPO_URL in .env"
-        )
-
-    return pulled_dirs
+    return mgr
 
 
 def _prepare_from_bundle(bundle_path: str, settings) -> str:
@@ -270,12 +253,12 @@ def _prepare_from_bundle(bundle_path: str, settings) -> str:
     Apply a git bundle into the import directory, returning the effective
     import_base_dir to use for the rest of the import.
     """
-    from pipeline.utils.repo_manager import GitRepoManager
+    from pipeline.utils.repo_manager import DatasetRepoManager
 
     bundle = Path(bundle_path)
     target = Path(settings.import_base_dir) / f"_bundle_{bundle.stem}"
     print(f"\n  Applying git bundle: {bundle.name}")
-    info = GitRepoManager.apply_bundle(bundle, target)
+    info = DatasetRepoManager.apply_bundle(bundle, target)
     print(f"  Extracted to {info['target_dir']}  (branch: {info['branch']})")
     return str(target)
 
@@ -306,11 +289,9 @@ def main():
     # --- Delivery source flags ---
     parser.add_argument(
         "--pull",
-        nargs="?",
-        const="both",
-        choices=["seed", "delta", "both"],
-        metavar="{seed,delta,both}",
-        help="Pull latest data from remote Git repos before importing (requires SEED_REPO_URL / DELTA_REPO_URL in .env). Default: both"
+        action="store_true",
+        help="Pull latest data from remote dataset repo before importing (requires DATASET_REPO_URL in .env). "
+             "Reads the delivery manifest to auto-detect sync modes and targets."
     )
     parser.add_argument(
         "--from-bundle",
@@ -325,8 +306,8 @@ def main():
 
     args = parser.parse_args()
 
-    if not args.table and not args.all:
-        print("Error: Must specify either --table <name> or --all")
+    if not args.table and not args.all and not args.pull:
+        print("Error: Must specify either --table <name>, --all, or --pull")
         sys.exit(1)
 
     try:
@@ -334,12 +315,54 @@ def main():
         import_base_dir = settings.import_base_dir
         password = settings.encryption_password
 
-        # Pre-process delivery source — --pull returns a list of dirs,
-        # the other modes return a single dir string (wrapped in a list for
-        # uniform handling by _resolve_import_dir).
+        # --pull: pull dataset repo, read delivery manifest, auto-import
         if args.pull:
-            import_base_dir = _prepare_from_pull(args.pull, settings)
-        elif args.from_bundle:
+            repo_mgr = _prepare_from_pull(settings)
+            import_base_dir = settings.dataset_repo_dir
+
+            manifest = repo_mgr.read_delivery_manifest(password)
+            manifest_tables = manifest.get("tables", [])
+            print(f"\n  Delivery manifest: {manifest.get('run_purpose', 'N/A')}")
+            print(f"  Tables in delivery: {len(manifest_tables)}")
+
+            if args.table:
+                manifest_tables = [
+                    t for t in manifest_tables if t["name"] == args.table
+                ]
+                if not manifest_tables:
+                    print(f"Error: Table '{args.table}' not in delivery manifest")
+                    sys.exit(1)
+
+            print(f"\n{'=' * 70}")
+            print(f"IMPORTING {len(manifest_tables)} TABLES FROM DELIVERY")
+            print(f"{'=' * 70}")
+
+            for entry in manifest_tables:
+                table_config = {
+                    "name": entry["name"],
+                    "sync_mode": entry.get("sync_mode", "full"),
+                    "merge_keys": entry.get("merge_keys", []),
+                    "postgres": entry.get("postgres", {}),
+                }
+                try:
+                    import_table(
+                        table_config,
+                        password,
+                        import_base_dir,
+                        truncate_first=args.truncate,
+                        keep_decrypted=args.keep_decrypted,
+                        resume=not args.no_resume,
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to import {entry['name']}: {e}")
+                    print(f"\n  Failed to import {entry['name']}: {e}")
+
+            print(f"\n{'=' * 70}")
+            print("ALL IMPORTS COMPLETE")
+            print(f"{'=' * 70}")
+            return
+
+        if args.from_bundle:
             import_base_dir = _prepare_from_bundle(args.from_bundle, settings)
         elif args.from_archive:
             import_base_dir = _prepare_from_archive(args.from_archive, settings)

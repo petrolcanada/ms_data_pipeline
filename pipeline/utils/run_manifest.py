@@ -16,7 +16,7 @@ class RunManifest:
 
     def __init__(self, run_type: str, output_dir: str = "state"):
         self.run_type = run_type  # "export" or "import"
-        self.started_at = datetime.utcnow().isoformat() + "Z"
+        self.started_at = datetime.now().astimezone().isoformat()
         self.tables: List[Dict[str, Any]] = []
         self.errors: List[Dict[str, Any]] = []
         self.output_dir = Path(output_dir)
@@ -50,7 +50,7 @@ class RunManifest:
         manifest = {
             "run_type": self.run_type,
             "started_at": self.started_at,
-            "completed_at": datetime.utcnow().isoformat() + "Z",
+            "completed_at": datetime.now().astimezone().isoformat(),
             "tables_processed": len(self.tables),
             "tables_failed": len(self.errors),
             "total_rows": sum(t["rows"] for t in self.tables),
@@ -58,7 +58,7 @@ class RunManifest:
             "errors": self.errors,
         }
 
-        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         out_path = self.output_dir / f"run_{self.run_type}_{ts}.json"
         with open(out_path, "w") as f:
             json.dump(manifest, f, indent=2)
