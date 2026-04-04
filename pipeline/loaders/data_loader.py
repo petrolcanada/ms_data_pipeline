@@ -44,6 +44,85 @@ class PostgreSQLDataLoader:
     # Public entry point
     # ------------------------------------------------------------------
 
+    _DTYPE_MAP: Dict[str, str] = {
+        "int8": "SMALLINT",
+        "int16": "SMALLINT",
+        "int32": "INTEGER",
+        "int64": "BIGINT",
+        "Int8": "SMALLINT",
+        "Int16": "SMALLINT",
+        "Int32": "INTEGER",
+        "Int64": "BIGINT",
+        "float16": "REAL",
+        "float32": "REAL",
+        "float64": "DOUBLE PRECISION",
+        "Float32": "REAL",
+        "Float64": "DOUBLE PRECISION",
+        "bool": "BOOLEAN",
+        "boolean": "BOOLEAN",
+        "datetime64[ns]": "TIMESTAMP",
+        "datetime64[ns, UTC]": "TIMESTAMPTZ",
+        "datetime64[us]": "TIMESTAMP",
+        "datetime64[us, UTC]": "TIMESTAMPTZ",
+    }
+
+    @classmethod
+    def _pg_type_for(cls, dtype) -> str:
+        """Map a pandas/numpy dtype to a PostgreSQL column type."""
+        dtype_str = str(dtype)
+        if dtype_str in cls._DTYPE_MAP:
+            return cls._DTYPE_MAP[dtype_str]
+        if dtype_str.startswith("datetime64"):
+            return "TIMESTAMPTZ" if "tz" in dtype_str.lower() else "TIMESTAMP"
+        return "TEXT"
+
+    def _get_table_columns(self, schema: str, table: str) -> List[str]:
+        """Return lowercase column names for a PostgreSQL table."""
+        conn = self.connect_to_postgres()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = %s AND table_name = %s "
+                "ORDER BY ordinal_position",
+                (schema.lower(), table.lower()),
+            )
+            return [row[0].lower() for row in cursor.fetchall()]
+        finally:
+            cursor.close()
+            conn.close()
+
+    def _add_missing_columns(
+        self, schema: str, table: str, df: pd.DataFrame, target_cols: set
+    ) -> List[str]:
+        """ALTER TABLE to add columns present in *df* but missing from the target.
+
+        Returns the list of column names that were added.
+        """
+        new_cols = [c for c in df.columns if c not in target_cols]
+        if not new_cols:
+            return []
+
+        conn = self.connect_to_postgres()
+        cursor = conn.cursor()
+        try:
+            for col in new_cols:
+                pg_type = self._pg_type_for(df[col].dtype)
+                cursor.execute(
+                    f'ALTER TABLE {schema}.{table} ADD COLUMN IF NOT EXISTS "{col}" {pg_type}'
+                )
+                logger.info(f"Added column \"{col}\" ({pg_type}) to {schema}.{table}")
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Failed to add columns: {e}")
+            raise
+        finally:
+            cursor.close()
+            conn.close()
+
+        return new_cols
+
     def load_parquet_to_table(
         self,
         parquet_path: Path,
@@ -70,6 +149,14 @@ class PostgreSQLDataLoader:
 
         df.columns = [col.lower() for col in df.columns]
         df = df.where(pd.notnull(df), None)
+
+        target_cols = set(self._get_table_columns(schema, table))
+        added = self._add_missing_columns(schema, table, df, target_cols)
+        if added:
+            logger.info(
+                f"Schema evolution: added {len(added)} column(s) to {schema}.{table}: "
+                f"{', '.join(added)}"
+            )
 
         if sync_mode == "upsert" and merge_keys:
             return self._upsert_via_staging(df, schema, table, merge_keys)
@@ -109,6 +196,75 @@ class PostgreSQLDataLoader:
     # Upsert via staging table
     # ------------------------------------------------------------------
 
+    def _ensure_unique_constraint(
+        self, schema: str, table: str, merge_keys: List[str]
+    ) -> None:
+        """Create a UNIQUE constraint on *merge_keys* if one does not already exist.
+
+        If the table contains duplicate rows on the merge keys, they are
+        deduplicated first (keeping the row with the latest ``ctid``).
+        """
+        keys_lower = [k.lower() for k in merge_keys]
+        keys_set = set(keys_lower)
+
+        conn = self.connect_to_postgres()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                SELECT c.conname, array_agg(a.attname ORDER BY k.n)
+                FROM pg_constraint c
+                JOIN pg_namespace ns ON ns.oid = c.connamespace
+                JOIN pg_class     cl ON cl.oid = c.conrelid
+                CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, n)
+                JOIN pg_attribute a  ON a.attrelid = cl.oid AND a.attnum = k.attnum
+                WHERE ns.nspname = %s
+                  AND cl.relname = %s
+                  AND c.contype IN ('u', 'p')
+                GROUP BY c.conname
+                """,
+                (schema.lower(), table.lower()),
+            )
+            for _name, cols in cursor.fetchall():
+                if set(cols) == keys_set:
+                    return
+
+            cols_str = ", ".join(f'"{c}"' for c in keys_lower)
+
+            # Remove duplicates before creating the constraint
+            dedup_sql = (
+                f"DELETE FROM {schema}.{table} t "
+                f"WHERE t.ctid NOT IN ("
+                f"  SELECT MAX(ctid) FROM {schema}.{table} "
+                f"  GROUP BY {cols_str}"
+                f")"
+            )
+            cursor.execute(dedup_sql)
+            dupes_removed = cursor.rowcount
+            if dupes_removed:
+                logger.warning(
+                    f"Removed {dupes_removed:,} duplicate row(s) from "
+                    f"{schema}.{table} on ({cols_str})"
+                )
+
+            constraint_name = f"uq_{table.lower()}_{'_'.join(keys_lower)}"
+            cursor.execute(
+                f'ALTER TABLE {schema}.{table} '
+                f'ADD CONSTRAINT {constraint_name} UNIQUE ({cols_str})'
+            )
+            conn.commit()
+            logger.info(
+                f"Created UNIQUE constraint {constraint_name} on "
+                f"{schema}.{table} ({cols_str})"
+            )
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Failed to create unique constraint: {e}")
+            raise
+        finally:
+            cursor.close()
+            conn.close()
+
     def _upsert_via_staging(
         self,
         df: pd.DataFrame,
@@ -117,6 +273,18 @@ class PostgreSQLDataLoader:
         merge_keys: List[str],
     ) -> Dict[str, Any]:
         """Load into a temp staging table then merge into target with ON CONFLICT."""
+        self._ensure_unique_constraint(schema, table, merge_keys)
+
+        merge_keys_lower = [k.lower() for k in merge_keys]
+        before = len(df)
+        df = df.drop_duplicates(subset=merge_keys_lower, keep="last")
+        dropped = before - len(df)
+        if dropped:
+            logger.warning(
+                f"Dropped {dropped:,} duplicate row(s) from incoming data on "
+                f"({', '.join(merge_keys_lower)})"
+            )
+
         conn = self.connect_to_postgres()
         cursor = conn.cursor()
         staging_table = f"_staging_{table}"

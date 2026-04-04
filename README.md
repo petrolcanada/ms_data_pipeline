@@ -58,15 +58,14 @@ Each table in `config/tables.yaml` supports one of three sync modes:
 tables:
   - name: "FUND_ATTRIBUTES_CA_OPENEND"
     sync_mode: "upsert"
-    merge_keys: ["_ID"]
-    watermark_column: "_TIMESTAMPTO"
+    merge_keys: ["_ID", "_TIMESTAMPFROM"]
+    watermark_column: "_TIMESTAMPFROM"
     snowflake:
       database: "PROD_DB"
       schema: "MORNINGSTAR_MAIN"
       table: "FUND_ATTRIBUTES_CA_OPENEND"
       filter:
         - "WHERE _ID IN (SELECT mstarid FROM ...)"
-        - "QUALIFY ROW_NUMBER() OVER (PARTITION BY _ID ORDER BY _TIMESTAMPTO DESC) = 1"
     postgres:
       schema: "ms"
       table: "FUND_ATTRIBUTES_CA_OPENEND"
@@ -75,6 +74,11 @@ tables:
         - "_TIMESTAMPFROM"
         - "_TIMESTAMPTO"
 ```
+
+**`merge_keys`** drives two things automatically:
+
+1. **Snowflake deduplication:** A `QUALIFY ROW_NUMBER() OVER (PARTITION BY {merge_keys} ORDER BY _TIMESTAMPTO DESC) = 1` clause is appended to the export query. Override the ORDER BY column with `qualify_order_by` if needed.
+2. **PostgreSQL upsert:** A `UNIQUE` constraint on the merge key columns is ensured, and `INSERT ... ON CONFLICT (merge_keys) DO UPDATE` is used for loading.
 
 **Watermark tracking:** The pipeline stores the last exported watermark in `state/{table}_watermark.json`. On subsequent runs, only rows newer than the watermark are extracted from Snowflake. If no watermark exists, the first run performs a full extraction automatically.
 

@@ -102,7 +102,7 @@ def import_table(
 
     encryptor = FileEncryptor()
     loader = PostgreSQLDataLoader()
-    checkpoint = ChunkCheckpoint(state_dir=get_settings().state_dir) if resume else None
+    checkpoint = ChunkCheckpoint(checkpoint_dir=get_settings().state_dir) if resume else None
     loaded_chunks = checkpoint.get_loaded_chunks(table_name) if checkpoint else set()
 
     if truncate_first or sync_mode == "full":

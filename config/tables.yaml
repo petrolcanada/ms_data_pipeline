@@ -3,12 +3,15 @@
 # Shared values — define once, reference with *alias
 peer_filter: &peer_filter "WHERE _ID IN (SELECT mstarid FROM CIGAM_SBX_PL.DNA_ANALYTICS_INSIGHTS_INVESTMENT_PRODUCT.V_MSTAR_PEERS_FCLASS_ETF_ID_CA_OPENEND)"
 
+# Auto-generated from merge_keys at export time:
+#   QUALIFY ROW_NUMBER() OVER (PARTITION BY {merge_keys} ORDER BY {qualify_order_by|_TIMESTAMPTO} DESC) = 1
+
 sf_defaults: &sf_defaults
   database: "CIGAM_PRD_RL"
   schema: "MORNINGSTAR_MAIN"
 
 tables:
-  # --- Tables with full history (no QUALIFY, merge on _ID + _TIMESTAMPFROM) ---
+  # --- Tables with merge on _ID + _TIMESTAMPFROM ---
 
   - name: "FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND"
     sync_mode: "upsert"
@@ -78,7 +81,7 @@ tables:
         - "_TIMESTAMPFROM"
         - "_TIMESTAMPTO"
 
-  # --- Tables with dedicated date key (QUALIFY keeps latest per key combo) ---
+  # --- Tables with dedicated date key ---
 
   - name: "MONTH_END_TRAILING_TOTAL_RETURNS_CA_OPENEND"
     sync_mode: "upsert"
@@ -89,7 +92,6 @@ tables:
       table: "MONTH_END_TRAILING_TOTAL_RETURNS_CA_OPENEND"
       filter:
         - *peer_filter
-        - "QUALIFY ROW_NUMBER() OVER (PARTITION BY _ID, MONTHENDDATE ORDER BY _TIMESTAMPTO DESC) = 1"
     postgres:
       schema: "ms"
       table: "MONTH_END_TRAILING_TOTAL_RETURNS_CA_OPENEND"
@@ -108,7 +110,6 @@ tables:
       table: "FUND_FLOW_DETAILS_CA_OPENEND"
       filter:
         - *peer_filter
-        - "QUALIFY ROW_NUMBER() OVER (PARTITION BY _ID, ESTFUNDLEVELNETFLOWDATEMOEND ORDER BY _TIMESTAMPTO DESC) = 1"
     postgres:
       schema: "ms"
       table: "FUND_FLOW_DETAILS_CA_OPENEND"
@@ -127,7 +128,6 @@ tables:
       table: "MORNINGSTAR_RATING_EXTENDED_PERFORMANCE_CA_OPENEND"
       filter:
         - *peer_filter
-        - "QUALIFY ROW_NUMBER() OVER (PARTITION BY _ID, RATINGDATE ORDER BY _TIMESTAMPTO DESC) = 1"
     postgres:
       schema: "ms"
       table: "MORNINGSTAR_RATING_EXTENDED_PERFORMANCE_CA_OPENEND"
@@ -146,7 +146,6 @@ tables:
       table: "MONTH_END_TRAILING_TOTAL_RETURN_PERCENTILE_AND_ABSOLUTE_RANKS_CA_OPENEND"
       filter:
         - *peer_filter
-        - "QUALIFY ROW_NUMBER() OVER (PARTITION BY _ID, MONTHENDDATE ORDER BY _TIMESTAMPTO DESC) = 1"
     postgres:
       schema: "ms"
       table: "MONTH_END_TRAILING_TOTAL_RETURN_PERCENTILE_AND_ABSOLUTE_RANKS_CA_OPENEND"
@@ -184,7 +183,6 @@ tables:
       table: "FUND_LEVEL_NET_ASSETS_CA_OPENEND"
       filter:
         - *peer_filter
-        - "QUALIFY ROW_NUMBER() OVER (PARTITION BY _ID, NETASSETSDATE ORDER BY _TIMESTAMPTO DESC) = 1"
     postgres:
       schema: "ms"
       table: "FUND_LEVEL_NET_ASSETS_CA_OPENEND"
@@ -203,7 +201,6 @@ tables:
       table: "RISK_MEASURE_CA_OPENEND"
       filter:
         - *peer_filter
-        - "QUALIFY ROW_NUMBER() OVER (PARTITION BY _ID, ENDDATE ORDER BY _TIMESTAMPTO DESC) = 1"
     postgres:
       schema: "ms"
       table: "RISK_MEASURE_CA_OPENEND"
@@ -222,7 +219,6 @@ tables:
       table: "ANNUAL_REPORT_FEES_CA_OPENEND"
       filter:
         - *peer_filter
-        - "QUALIFY ROW_NUMBER() OVER (PARTITION BY _ID, ANNUALREPORTDATE ORDER BY _TIMESTAMPTO DESC) = 1"
     postgres:
       schema: "ms"
       table: "ANNUAL_REPORT_FEES_CA_OPENEND"
@@ -260,7 +256,6 @@ tables:
       table: "FEE_LEVELS_CA_OPENEND"
       filter:
         - *peer_filter
-        - "QUALIFY ROW_NUMBER() OVER (PARTITION BY _ID, FEELEVELDATE ORDER BY _TIMESTAMPTO DESC) = 1"
     postgres:
       schema: "ms"
       table: "FEE_LEVELS_CA_OPENEND"

@@ -111,8 +111,23 @@ def export_table(
     
     stats = ExportStatistics()
     
-    # Build filter and watermark
+    # Build filter and watermark — auto-generate QUALIFY from merge_keys
     filter_config = sf_config.get('filter')
+
+    if merge_keys:
+        order_col = table_config.get("qualify_order_by", "_TIMESTAMPTO")
+        partition_cols = ", ".join(merge_keys)
+        qualify = (
+            f"QUALIFY ROW_NUMBER() OVER "
+            f"(PARTITION BY {partition_cols} ORDER BY {order_col} DESC) = 1"
+        )
+        if isinstance(filter_config, list):
+            filter_config = list(filter_config) + [qualify]
+        elif filter_config:
+            filter_config = [filter_config, qualify]
+        else:
+            filter_config = [qualify]
+
     filter_clause = extractor._build_filter_clause(filter_config)
     
     watermark_mgr = WatermarkManager(state_dir=get_settings().state_dir)
