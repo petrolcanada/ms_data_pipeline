@@ -162,11 +162,14 @@ tables:
 
   - name: "FUND_FLOW_DETAILS_CA_OPENEND"
     sync_mode: "upsert"
-    merge_keys: ["_ID", "ESTFUNDLEVELNETFLOWDATEMOEND"]
+    merge_keys: ["_ID", "MONTHENDDATE"]
     watermark_column: "_TIMESTAMPFROM"
     snowflake:
       <<: *sf_defaults
       table: "FUND_FLOW_DETAILS_CA_OPENEND"
+      source_query: |
+        SELECT *, ESTFUNDLEVELNETFLOWDATEMOEND AS MONTHENDDATE
+        FROM {table}
       filter:
         - *peer_filter
     postgres:
@@ -174,17 +177,20 @@ tables:
       table: "FUND_FLOW_DETAILS_CA_OPENEND"
       indexes:
         - "_ID"
-        - "ESTFUNDLEVELNETFLOWDATEMOEND"
+        - "MONTHENDDATE"
         - "_TIMESTAMPFROM"
         - "_TIMESTAMPTO"
 
   - name: "MORNINGSTAR_RATING_EXTENDED_PERFORMANCE_CA_OPENEND"
     sync_mode: "upsert"
-    merge_keys: ["_ID", "RATINGDATE"]
+    merge_keys: ["_ID", "MONTHENDDATE"]
     watermark_column: "_TIMESTAMPFROM"
     snowflake:
       <<: *sf_defaults
       table: "MORNINGSTAR_RATING_EXTENDED_PERFORMANCE_CA_OPENEND"
+      source_query: |
+        SELECT *, RATINGDATE AS MONTHENDDATE
+        FROM {table}
       filter:
         - *peer_filter
     postgres:
@@ -192,7 +198,7 @@ tables:
       table: "MORNINGSTAR_RATING_EXTENDED_PERFORMANCE_CA_OPENEND"
       indexes:
         - "_ID"
-        - "RATINGDATE"
+        - "MONTHENDDATE"
         - "_TIMESTAMPFROM"
         - "_TIMESTAMPTO"
 
@@ -216,11 +222,14 @@ tables:
 
   - name: "RELATIVE_RISK_MEASURE_PROSPECTUS_CA_OPENEND"
     sync_mode: "upsert"
-    merge_keys: ["_ID", "ENDDATE"]
+    merge_keys: ["_ID", "MONTHENDDATE"]
     watermark_column: "_TIMESTAMPFROM"
     snowflake:
       <<: *sf_defaults
       table: "RELATIVE_RISK_MEASURE_PROSPECTUS_CA_OPENEND"
+      source_query: |
+        SELECT *, ENDDATE AS MONTHENDDATE
+        FROM {table}
       filter:
         - *peer_filter
     postgres:
@@ -228,7 +237,7 @@ tables:
       table: "RELATIVE_RISK_MEASURE_PROSPECTUS_CA_OPENEND"
       indexes:
         - "_ID"
-        - "ENDDATE"
+        - "MONTHENDDATE"
         - "_TIMESTAMPFROM"
         - "_TIMESTAMPTO"
 
@@ -265,11 +274,14 @@ tables:
 
   - name: "RISK_MEASURE_CA_OPENEND"
     sync_mode: "upsert"
-    merge_keys: ["_ID", "ENDDATE"]
+    merge_keys: ["_ID", "MONTHENDDATE"]
     watermark_column: "_TIMESTAMPFROM"
     snowflake:
       <<: *sf_defaults
       table: "RISK_MEASURE_CA_OPENEND"
+      source_query: |
+        SELECT *, ENDDATE AS MONTHENDDATE
+        FROM {table}
       filter:
         - *peer_filter
     postgres:
@@ -277,17 +289,30 @@ tables:
       table: "RISK_MEASURE_CA_OPENEND"
       indexes:
         - "_ID"
-        - "ENDDATE"
+        - "MONTHENDDATE"
         - "_TIMESTAMPFROM"
         - "_TIMESTAMPTO"
 
   - name: "ANNUAL_REPORT_FEES_CA_OPENEND"
     sync_mode: "upsert"
-    merge_keys: ["_ID", "ANNUALREPORTDATE"]
+    merge_keys: ["_ID", "MONTHENDDATE"]
     watermark_column: "_TIMESTAMPFROM"
     snowflake:
       <<: *sf_defaults
       table: "ANNUAL_REPORT_FEES_CA_OPENEND"
+      source_query: |
+        WITH month_ends AS (
+            SELECT DISTINCT MONTHENDDATE
+            FROM CIGAM_PRD_RL.MORNINGSTAR_MAIN.MONTH_END_TRAILING_TOTAL_RETURNS_CA_OPENEND
+        )
+        SELECT src.*, m.MONTHENDDATE
+        FROM {table} src
+        INNER JOIN month_ends m
+            ON src.ANNUALREPORTDATE <= m.MONTHENDDATE
+        QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY src._ID, m.MONTHENDDATE
+            ORDER BY src.ANNUALREPORTDATE DESC, src._TIMESTAMPTO DESC
+        ) = 1
       filter:
         - *peer_filter
     postgres:
@@ -295,17 +320,20 @@ tables:
       table: "ANNUAL_REPORT_FEES_CA_OPENEND"
       indexes:
         - "_ID"
-        - "ANNUALREPORTDATE"
+        - "MONTHENDDATE"
         - "_TIMESTAMPFROM"
         - "_TIMESTAMPTO"
 
   - name: "MORNINGSTAR_RATING_CA_OPENEND"
     sync_mode: "upsert"
-    merge_keys: ["_ID", "RATINGDATE"]
+    merge_keys: ["_ID", "MONTHENDDATE"]
     watermark_column: "_TIMESTAMPFROM"
     snowflake:
       <<: *sf_defaults
       table: "MORNINGSTAR_RATING_CA_OPENEND"
+      source_query: |
+        SELECT *, RATINGDATE AS MONTHENDDATE
+        FROM {table}
       filter:
         - *peer_filter
     postgres:
@@ -313,17 +341,20 @@ tables:
       table: "MORNINGSTAR_RATING_CA_OPENEND"
       indexes:
         - "_ID"
-        - "RATINGDATE"
+        - "MONTHENDDATE"
         - "_TIMESTAMPFROM"
         - "_TIMESTAMPTO"
 
   - name: "FEE_LEVELS_CA_OPENEND"
     sync_mode: "upsert"
-    merge_keys: ["_ID", "FEELEVELDATE"]
+    merge_keys: ["_ID", "MONTHENDDATE"]
     watermark_column: "_TIMESTAMPFROM"
     snowflake:
       <<: *sf_defaults
       table: "FEE_LEVELS_CA_OPENEND"
+      source_query: |
+        SELECT *, FEELEVELDATE AS MONTHENDDATE
+        FROM {table}
       filter:
         - *peer_filter
     postgres:
@@ -331,6 +362,6 @@ tables:
       table: "FEE_LEVELS_CA_OPENEND"
       indexes:
         - "_ID"
-        - "FEELEVELDATE"
+        - "MONTHENDDATE"
         - "_TIMESTAMPFROM"
         - "_TIMESTAMPTO"
