@@ -201,11 +201,16 @@ class PostgreSQLDataLoader:
     ) -> None:
         """Create a UNIQUE constraint on *merge_keys* if one does not already exist.
 
+        Drops any pipeline-managed ``uq_`` constraints whose columns no
+        longer match the current merge keys, so stale constraints from a
+        previous run don't block the upsert.
+
         If the table contains duplicate rows on the merge keys, they are
         deduplicated first (keeping the row with the latest ``ctid``).
         """
         keys_lower = [k.lower() for k in merge_keys]
         keys_set = set(keys_lower)
+        desired_name = f"uq_{table.lower()}_{'_'.join(keys_lower)}"
 
         conn = self.connect_to_postgres()
         cursor = conn.cursor()
@@ -225,13 +230,27 @@ class PostgreSQLDataLoader:
                 """,
                 (schema.lower(), table.lower()),
             )
-            for _name, cols in cursor.fetchall():
+            existing = cursor.fetchall()
+
+            found_match = False
+            for name, cols in existing:
                 if set(cols) == keys_set:
-                    return
+                    found_match = True
+                    continue
+                if name.startswith("uq_"):
+                    cursor.execute(
+                        f'ALTER TABLE {schema}.{table} DROP CONSTRAINT {name}'
+                    )
+                    logger.info(
+                        f"Dropped stale constraint {name} on {schema}.{table}"
+                    )
+
+            if found_match:
+                conn.commit()
+                return
 
             cols_str = ", ".join(f'"{c}"' for c in keys_lower)
 
-            # Remove duplicates before creating the constraint
             dedup_sql = (
                 f"DELETE FROM {schema}.{table} t "
                 f"WHERE t.ctid NOT IN ("
@@ -247,14 +266,13 @@ class PostgreSQLDataLoader:
                     f"{schema}.{table} on ({cols_str})"
                 )
 
-            constraint_name = f"uq_{table.lower()}_{'_'.join(keys_lower)}"
             cursor.execute(
                 f'ALTER TABLE {schema}.{table} '
-                f'ADD CONSTRAINT {constraint_name} UNIQUE ({cols_str})'
+                f'ADD CONSTRAINT {desired_name} UNIQUE ({cols_str})'
             )
             conn.commit()
             logger.info(
-                f"Created UNIQUE constraint {constraint_name} on "
+                f"Created UNIQUE constraint {desired_name} on "
                 f"{schema}.{table} ({cols_str})"
             )
         except Exception as e:

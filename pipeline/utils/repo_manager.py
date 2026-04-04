@@ -245,15 +245,28 @@ class DatasetRepoManager:
         return {"branch": branch, "head": sha, "remote": remote_name}
 
     def pull(self, remote_name: str = "origin") -> Dict[str, Any]:
-        """Pull the latest commits from the remote."""
+        """
+        Fetch and hard-reset to the remote branch.
+
+        The producer creates orphan commits (no shared history), so a
+        normal ``git pull`` would fail with "unrelated histories".
+        Fetch + reset avoids that entirely.
+        """
         if not self.remote_url:
             raise ValueError("No remote URL configured (set DATASET_REPO_URL in .env)")
 
+        self.repo_dir.mkdir(parents=True, exist_ok=True)
+        git_dir = self.repo_dir / ".git"
+        if not git_dir.exists():
+            _run_git(["init"], cwd=self.repo_dir)
+
         self._ensure_remote(remote_name)
-        _run_git(["pull", remote_name], cwd=self.repo_dir)
+        _run_git(["fetch", remote_name], cwd=self.repo_dir)
+
+        branch = self._detect_remote_default_branch(remote_name) or "main"
+        _run_git(["reset", "--hard", f"{remote_name}/{branch}"], cwd=self.repo_dir)
 
         sha = _run_git(["rev-parse", "--short", "HEAD"], cwd=self.repo_dir).stdout.strip()
-        branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=self.repo_dir).stdout.strip()
         commit_msg = _run_git(["log", "-1", "--format=%s"], cwd=self.repo_dir).stdout.strip()
 
         logger.info(f"Pulled: {branch} @ {sha}")
