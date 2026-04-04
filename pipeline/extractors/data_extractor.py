@@ -129,7 +129,8 @@ class SnowflakeDataExtractor:
         database: str, 
         schema: str, 
         table: str,
-        filter_clause: str = None
+        filter_clause: str = None,
+        base_query: str = None,
     ) -> Dict[str, Any]:
         """
         Estimate table size and row count
@@ -149,13 +150,11 @@ class SnowflakeDataExtractor:
         try:
             # If filter is provided, count filtered rows
             if filter_clause:
-                # Wrap the filtered query in a subquery to count results
-                # This is necessary because COUNT(*) doesn't work directly with QUALIFY
+                select_from = base_query if base_query else f"SELECT * FROM {database}.{schema}.{table}"
                 count_query = f"""
                 SELECT COUNT(*) 
                 FROM (
-                    SELECT * 
-                    FROM {database}.{schema}.{table}
+                    {select_from}
                     {filter_clause}
                 ) AS filtered_data
                 """
@@ -279,7 +278,8 @@ class SnowflakeDataExtractor:
         table: str, 
         chunk_size: int = 100000,
         order_by: str = None,
-        filter_clause: str = None
+        filter_clause: str = None,
+        base_query: str = None,
     ) -> Generator[pd.DataFrame, None, None]:
         """
         Extract table data in chunks
@@ -300,7 +300,7 @@ class SnowflakeDataExtractor:
         
         try:
             # Build query
-            query = f"SELECT * FROM {database}.{schema}.{table}"
+            query = base_query if base_query else f"SELECT * FROM {database}.{schema}.{table}"
             
             # Add filter clause if provided
             if filter_clause:
