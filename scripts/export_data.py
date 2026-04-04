@@ -83,6 +83,7 @@ def export_table(
     sync_mode = table_config.get('sync_mode', 'full')
     watermark_column = table_config.get('watermark_column')
     merge_keys = table_config.get('merge_keys', [])
+    source_query = sf_config.get('source_query')
     
     sort_columns: Optional[List[str]] = None
     if sort_before_compress:
@@ -114,7 +115,7 @@ def export_table(
     # Build filter and watermark — auto-generate QUALIFY from merge_keys
     filter_config = sf_config.get('filter')
 
-    if merge_keys:
+    if merge_keys and not source_query:
         order_col = table_config.get("qualify_order_by", "_TIMESTAMPTO")
         partition_cols = ", ".join(merge_keys)
         qualify = (
@@ -141,7 +142,12 @@ def export_table(
                 filter_clause = extractor.inject_watermark(filter_clause, watermark_column, watermark_value)
     
     # Build the full query (used in manifest and logging)
-    base_query = f"SELECT * FROM {sf_config['database']}.{sf_config['schema']}.{sf_config['table']}"
+    fqn = f"{sf_config['database']}.{sf_config['schema']}.{sf_config['table']}"
+    if source_query:
+        resolved = source_query.strip().replace("{table}", fqn)
+        base_query = f"SELECT * FROM ({resolved}) AS _src"
+    else:
+        base_query = f"SELECT * FROM {fqn}"
     full_query = f"{base_query} {filter_clause}" if filter_clause else base_query
     logger.info(f"Query: {full_query}")
     
@@ -150,7 +156,8 @@ def export_table(
         sf_config['database'],
         sf_config['schema'],
         sf_config['table'],
-        filter_clause=filter_clause
+        filter_clause=filter_clause,
+        base_query=base_query if source_query else None,
     )
     estimated_rows = size_info['row_count']
     estimated_mb = size_info['size_mb']
@@ -173,7 +180,8 @@ def export_table(
         sf_config['schema'],
         sf_config['table'],
         chunk_size=chunk_size,
-        filter_clause=filter_clause
+        filter_clause=filter_clause,
+        base_query=base_query if source_query else None,
     ):
         chunk_num += 1
         total_rows += len(df_chunk)
@@ -571,11 +579,13 @@ def main():
                 meta_obfuscator = MetadataObfuscator() if use_obfuscation else None
                 meta_extractor = SnowflakeMetadataExtractor(obfuscator=meta_obfuscator)
                 
+                selected_names = [t['name'] for t in table_configs] if args.table else None
                 print(f"\n  Metadata: extracting {len(table_configs)} table(s)...")
                 meta_results = meta_extractor.extract_all_configured_tables(
                     check_changes=True,
                     password=password,
                     conn=conn_manager.get_connection(),
+                    table_names=selected_names,
                 )
                 
                 meta_ok = sum(1 for r in meta_results.values() if r["status"] == "success")

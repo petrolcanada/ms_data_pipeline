@@ -618,7 +618,7 @@ class SnowflakeMetadataExtractor:
         
         return ddl_file
     
-    def extract_all_configured_tables(self, check_changes: bool = False, force: bool = False, password: Optional[str] = None, conn=None) -> Dict[str, Any]:
+    def extract_all_configured_tables(self, check_changes: bool = False, force: bool = False, password: Optional[str] = None, conn=None, table_names: Optional[List[str]] = None) -> Dict[str, Any]:
         """
         Extract metadata for all tables in config/tables.yaml
         
@@ -627,12 +627,18 @@ class SnowflakeMetadataExtractor:
             force: Force re-extraction even if no changes detected
             password: Encryption password (required if obfuscation enabled)
             conn: Optional external Snowflake connection to reuse
+            table_names: Optional list of table names to filter to (None = all)
             
         Returns:
             Dictionary with extraction results for each table
         """
         with open("config/tables.yaml", 'r') as f:
             config = yaml.safe_load(f)
+        
+        table_configs = config["tables"]
+        if table_names:
+            allowed = set(table_names)
+            table_configs = [t for t in table_configs if t["name"] in allowed]
         
         results = {}
         
@@ -642,7 +648,7 @@ class SnowflakeMetadataExtractor:
             conn = self.connect_to_snowflake()
         
         try:
-            for table_config in config["tables"]:
+            for table_config in table_configs:
                 table_name = table_config["name"]
                 sf_config = table_config["snowflake"]
                 pg_config = table_config["postgres"]
