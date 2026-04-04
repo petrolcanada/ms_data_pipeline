@@ -73,15 +73,25 @@ Decrypts Parquet files and loads them into PostgreSQL via COPY or upsert (depend
 
 ### Day-to-Day (Incremental Sync)
 
-Once tables exist in PostgreSQL, subsequent syncs only need steps 3, 4, and 6. The pipeline automatically uses watermarks to extract only new/changed rows.
+Once tables exist in PostgreSQL, subsequent syncs only need export, delivery, and import. The pipeline automatically uses watermarks to extract only new/changed rows.
 
 ```bash
-# VPN side — export only rows newer than the last watermark
+# VPN side — export + push to remote in one step (requires REPO_MODE=repo)
+python scripts/export_data.py --all --push
+
+# External side — pull from remote + auto-import (reads delivery manifest)
+python scripts/import_data.py --pull
+```
+
+Or, if transferring files manually (`REPO_MODE=single`):
+
+```bash
+# VPN side — export only
 python scripts/export_data.py --all
 
-# (transfer files)
+# (manually transfer files to PostgreSQL host)
 
-# External side — import (upsert/append, no truncation)
+# External side — import
 python scripts/import_data.py --all
 ```
 
@@ -288,6 +298,17 @@ python scripts/export_data.py --all --repo-mode single
 ```
 
 #### Git Delivery
+
+The pipeline supports two repo modes for controlling how exported data is delivered:
+
+| Mode | Behavior |
+|------|----------|
+| `single` | Writes encrypted files to `EXPORT_BASE_DIR` only. No Git operations. You manage commits and transfers manually. |
+| `repo` | Copies exports into a **disposable staging repo** (`DATASET_REPO_DIR`), which is deleted and re-created from scratch each run. The repo always contains a single orphan commit (no history). Enables `--push` and `--bundle`. |
+
+Set the default via `REPO_MODE` in `.env`, or override per-run with `--repo-mode`.
+
+> **Note:** `--push` and `--bundle` require `--repo-mode repo`. If your `EXPORT_BASE_DIR` is itself a Git repo, the pipeline does not interact with it — use `repo` mode for automated delivery, or `single` mode and manage that repo yourself.
 
 ```bash
 # Commit to dataset repo + push to remote
