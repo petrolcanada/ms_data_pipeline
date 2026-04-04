@@ -15,11 +15,25 @@ tables:
 
   - name: "FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND"
     sync_mode: "upsert"
-    merge_keys: ["_ID", "_TIMESTAMPFROM"]
+    merge_keys: ["_ID", "MONTHENDDATE"]
     watermark_column: "_TIMESTAMPFROM"
     snowflake:
       <<: *sf_defaults
       table: "FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND"
+      source_query: |
+        WITH month_ends AS (
+            SELECT DISTINCT MONTHENDDATE
+            FROM CIGAM_PRD_RL.MORNINGSTAR_MAIN.MONTH_END_TRAILING_TOTAL_RETURNS_CA_OPENEND
+        )
+        SELECT src.*, m.MONTHENDDATE
+        FROM {table} src
+        INNER JOIN month_ends m
+            ON src._TIMESTAMPFROM < m.MONTHENDDATE
+            AND m.MONTHENDDATE <= src._TIMESTAMPTO
+        QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY src._ID, m.MONTHENDDATE
+            ORDER BY src._TIMESTAMPFROM DESC, src._TIMESTAMPTO DESC
+        ) = 1
       filter:
         - *peer_filter
     postgres:
@@ -27,16 +41,31 @@ tables:
       table: "FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND"
       indexes:
         - "_ID"
+        - "MONTHENDDATE"
         - "_TIMESTAMPFROM"
         - "_TIMESTAMPTO"
 
   - name: "FUND_ATTRIBUTES_CA_OPENEND"
     sync_mode: "upsert"
-    merge_keys: ["_ID", "_TIMESTAMPFROM"]
+    merge_keys: ["_ID", "MONTHENDDATE"]
     watermark_column: "_TIMESTAMPFROM"
     snowflake:
       <<: *sf_defaults
       table: "FUND_ATTRIBUTES_CA_OPENEND"
+      source_query: |
+        WITH month_ends AS (
+            SELECT DISTINCT MONTHENDDATE
+            FROM CIGAM_PRD_RL.MORNINGSTAR_MAIN.MONTH_END_TRAILING_TOTAL_RETURNS_CA_OPENEND
+        )
+        SELECT src.*, m.MONTHENDDATE
+        FROM {table} src
+        INNER JOIN month_ends m
+            ON src._TIMESTAMPFROM < m.MONTHENDDATE
+            AND m.MONTHENDDATE <= src._TIMESTAMPTO
+        QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY src._ID, m.MONTHENDDATE
+            ORDER BY src._TIMESTAMPFROM DESC, src._TIMESTAMPTO DESC
+        ) = 1
       filter:
         - *peer_filter
     postgres:
@@ -44,16 +73,31 @@ tables:
       table: "FUND_ATTRIBUTES_CA_OPENEND"
       indexes:
         - "_ID"
+        - "MONTHENDDATE"
         - "_TIMESTAMPFROM"
         - "_TIMESTAMPTO"
 
   - name: "FUND_MANAGER_CA_OPENEND"
     sync_mode: "upsert"
-    merge_keys: ["_ID", "_TIMESTAMPFROM"]
+    merge_keys: ["_ID", "MONTHENDDATE"]
     watermark_column: "_TIMESTAMPFROM"
     snowflake:
       <<: *sf_defaults
       table: "FUND_MANAGER_CA_OPENEND"
+      source_query: |
+        WITH month_ends AS (
+            SELECT DISTINCT MONTHENDDATE
+            FROM CIGAM_PRD_RL.MORNINGSTAR_MAIN.MONTH_END_TRAILING_TOTAL_RETURNS_CA_OPENEND
+        )
+        SELECT src.*, m.MONTHENDDATE
+        FROM {table} src
+        INNER JOIN month_ends m
+            ON src._TIMESTAMPFROM < m.MONTHENDDATE
+            AND m.MONTHENDDATE <= src._TIMESTAMPTO
+        QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY src._ID, m.MONTHENDDATE
+            ORDER BY src._TIMESTAMPFROM DESC, src._TIMESTAMPTO DESC
+        ) = 1
       filter:
         - *peer_filter
     postgres:
@@ -61,16 +105,30 @@ tables:
       table: "FUND_MANAGER_CA_OPENEND"
       indexes:
         - "_ID"
+        - "MONTHENDDATE"
         - "_TIMESTAMPFROM"
         - "_TIMESTAMPTO"
 
   - name: "PROSPECTUS_FEES_CA_OPENEND"
     sync_mode: "upsert"
-    merge_keys: ["_ID", "_TIMESTAMPFROM"]
+    merge_keys: ["_ID", "MONTHENDDATE"]
     watermark_column: "_TIMESTAMPFROM"
     snowflake:
       <<: *sf_defaults
       table: "PROSPECTUS_FEES_CA_OPENEND"
+      source_query: |
+        WITH month_ends AS (
+            SELECT DISTINCT MONTHENDDATE
+            FROM CIGAM_PRD_RL.MORNINGSTAR_MAIN.MONTH_END_TRAILING_TOTAL_RETURNS_CA_OPENEND
+        )
+        SELECT src.*, m.MONTHENDDATE
+        FROM {table} src
+        INNER JOIN month_ends m
+            ON src.PROSPECTUSDATE <= m.MONTHENDDATE
+        QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY src._ID, m.MONTHENDDATE
+            ORDER BY src.PROSPECTUSDATE DESC, src._TIMESTAMPTO DESC
+        ) = 1
       filter:
         - *peer_filter
     postgres:
@@ -78,6 +136,7 @@ tables:
       table: "PROSPECTUS_FEES_CA_OPENEND"
       indexes:
         - "_ID"
+        - "MONTHENDDATE"
         - "_TIMESTAMPFROM"
         - "_TIMESTAMPTO"
 
@@ -164,7 +223,6 @@ tables:
       table: "RELATIVE_RISK_MEASURE_PROSPECTUS_CA_OPENEND"
       filter:
         - *peer_filter
-        - "QUALIFY ROW_NUMBER() OVER (PARTITION BY _ID, ENDDATE ORDER BY _TIMESTAMPTO DESC) = 1"
     postgres:
       schema: "ms"
       table: "RELATIVE_RISK_MEASURE_PROSPECTUS_CA_OPENEND"
@@ -176,19 +234,23 @@ tables:
 
   - name: "FUND_LEVEL_NET_ASSETS_CA_OPENEND"
     sync_mode: "upsert"
-    merge_keys: ["_ID", "NETASSETSDATE"]
+    merge_keys: ["_ID", "MONTHENDDATE"]
     watermark_column: "_TIMESTAMPFROM"
     snowflake:
       <<: *sf_defaults
       table: "FUND_LEVEL_NET_ASSETS_CA_OPENEND"
       source_query: |
-        SELECT * EXCLUDE (NETASSETSDATE),
-               LAST_DAY(TO_DATE(NETASSETSDATE)) AS NETASSETSDATE
-        FROM {table}
-        WHERE LAST_DAY(TO_DATE(NETASSETSDATE)) < DATE_TRUNC('month', CURRENT_DATE())
+        WITH month_ends AS (
+            SELECT DISTINCT MONTHENDDATE
+            FROM CIGAM_PRD_RL.MORNINGSTAR_MAIN.MONTH_END_TRAILING_TOTAL_RETURNS_CA_OPENEND
+        )
+        SELECT src.*, m.MONTHENDDATE
+        FROM {table} src
+        INNER JOIN month_ends m
+            ON src.NETASSETSDATE <= m.MONTHENDDATE
         QUALIFY ROW_NUMBER() OVER (
-            PARTITION BY _ID, LAST_DAY(TO_DATE(NETASSETSDATE))
-            ORDER BY TO_DATE(NETASSETSDATE) DESC, _TIMESTAMPTO DESC
+            PARTITION BY src._ID, m.MONTHENDDATE
+            ORDER BY src.NETASSETSDATE DESC, src._TIMESTAMPTO DESC
         ) = 1
       filter:
         - *peer_filter
@@ -197,7 +259,7 @@ tables:
       table: "FUND_LEVEL_NET_ASSETS_CA_OPENEND"
       indexes:
         - "_ID"
-        - "NETASSETSDATE"
+        - "MONTHENDDATE"
         - "_TIMESTAMPFROM"
         - "_TIMESTAMPTO"
 
@@ -246,7 +308,6 @@ tables:
       table: "MORNINGSTAR_RATING_CA_OPENEND"
       filter:
         - *peer_filter
-        - "QUALIFY ROW_NUMBER() OVER (PARTITION BY _ID, RATINGDATE ORDER BY _TIMESTAMPTO DESC) = 1"
     postgres:
       schema: "ms"
       table: "MORNINGSTAR_RATING_CA_OPENEND"

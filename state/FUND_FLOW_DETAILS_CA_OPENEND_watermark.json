@@ -1,7 +1,28 @@
 {
   "table_name": "FUND_FLOW_DETAILS_CA_OPENEND",
-  "watermark_value": "2026-04-03 05:05:30.199739+00:00",
-  "rows_exported": 82990,
-  "updated_at": "2026-04-03T22:04:32.996995Z",
-  "history": []
+  "watermark_value": "2026-04-04 05:05:02.506462+00:00",
+  "rows_exported": 82993,
+  "updated_at": "2026-04-04T12:05:55.115040-04:00",
+  "history": [
+    {
+      "watermark_value": "2026-04-03 05:05:30.199739+00:00",
+      "rows_exported": 82990,
+      "updated_at": "2026-04-03T22:04:32.996995Z"
+    },
+    {
+      "watermark_value": "2026-04-03 05:05:30.199739+00:00",
+      "rows_exported": 82990,
+      "updated_at": "2026-04-03T23:32:20.702205-04:00"
+    },
+    {
+      "watermark_value": "2026-04-04 05:05:02.506462+00:00",
+      "rows_exported": 82993,
+      "updated_at": "2026-04-04T11:54:38.190283-04:00"
+    },
+    {
+      "watermark_value": "2026-04-04 05:05:02.506462+00:00",
+      "rows_exported": 82993,
+      "updated_at": "2026-04-04T11:59:26.475292-04:00"
+    }
+  ]
 }

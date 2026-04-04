@@ -1,7 +1,28 @@
 {
   "table_name": "FEE_LEVELS_CA_OPENEND",
-  "watermark_value": "2026-04-02 05:08:03.884807+00:00",
-  "rows_exported": 73266,
-  "updated_at": "2026-04-03T22:06:23.221420Z",
-  "history": []
+  "watermark_value": "2026-04-04 05:05:02.506462+00:00",
+  "rows_exported": 73268,
+  "updated_at": "2026-04-04T12:06:40.206136-04:00",
+  "history": [
+    {
+      "watermark_value": "2026-04-02 05:08:03.884807+00:00",
+      "rows_exported": 73266,
+      "updated_at": "2026-04-03T22:06:23.221420Z"
+    },
+    {
+      "watermark_value": "2026-04-02 05:08:03.884807+00:00",
+      "rows_exported": 73266,
+      "updated_at": "2026-04-03T23:32:57.720131-04:00"
+    },
+    {
+      "watermark_value": "2026-04-04 05:05:02.506462+00:00",
+      "rows_exported": 73268,
+      "updated_at": "2026-04-04T11:55:52.267558-04:00"
+    },
+    {
+      "watermark_value": "2026-04-04 05:05:02.506462+00:00",
+      "rows_exported": 73268,
+      "updated_at": "2026-04-04T12:00:13.421709-04:00"
+    }
+  ]
 }

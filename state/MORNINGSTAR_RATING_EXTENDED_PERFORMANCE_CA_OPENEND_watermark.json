@@ -1,7 +1,28 @@
 {
   "table_name": "MORNINGSTAR_RATING_EXTENDED_PERFORMANCE_CA_OPENEND",
-  "watermark_value": "2026-04-02 05:08:03.884807+00:00",
-  "rows_exported": 62589,
-  "updated_at": "2026-04-03T22:04:39.021646Z",
-  "history": []
+  "watermark_value": "2026-04-04 05:05:02.506462+00:00",
+  "rows_exported": 62591,
+  "updated_at": "2026-04-04T12:05:58.928768-04:00",
+  "history": [
+    {
+      "watermark_value": "2026-04-02 05:08:03.884807+00:00",
+      "rows_exported": 62589,
+      "updated_at": "2026-04-03T22:04:39.021646Z"
+    },
+    {
+      "watermark_value": "2026-04-02 05:08:03.884807+00:00",
+      "rows_exported": 62589,
+      "updated_at": "2026-04-03T23:32:25.031115-04:00"
+    },
+    {
+      "watermark_value": "2026-04-04 05:05:02.506462+00:00",
+      "rows_exported": 62591,
+      "updated_at": "2026-04-04T11:54:44.113353-04:00"
+    },
+    {
+      "watermark_value": "2026-04-04 05:05:02.506462+00:00",
+      "rows_exported": 62591,
+      "updated_at": "2026-04-04T11:59:30.128501-04:00"
+    }
+  ]
 }

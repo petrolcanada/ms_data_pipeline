@@ -1,7 +1,28 @@
 {
   "table_name": "ANNUAL_REPORT_FEES_CA_OPENEND",
-  "watermark_value": "2026-04-03 05:05:30.199739+00:00",
-  "rows_exported": 11243,
-  "updated_at": "2026-04-03T22:06:08.879833Z",
-  "history": []
+  "watermark_value": "2026-04-04 05:05:02.506462+00:00",
+  "rows_exported": 11387,
+  "updated_at": "2026-04-04T12:06:31.769131-04:00",
+  "history": [
+    {
+      "watermark_value": "2026-04-03 05:05:30.199739+00:00",
+      "rows_exported": 11243,
+      "updated_at": "2026-04-03T22:06:08.879833Z"
+    },
+    {
+      "watermark_value": "2026-04-03 05:05:30.199739+00:00",
+      "rows_exported": 11243,
+      "updated_at": "2026-04-03T23:32:54.826806-04:00"
+    },
+    {
+      "watermark_value": "2026-04-04 05:05:02.506462+00:00",
+      "rows_exported": 11387,
+      "updated_at": "2026-04-04T11:55:38.945137-04:00"
+    },
+    {
+      "watermark_value": "2026-04-04 05:05:02.506462+00:00",
+      "rows_exported": 11387,
+      "updated_at": "2026-04-04T12:00:03.885442-04:00"
+    }
+  ]
 }

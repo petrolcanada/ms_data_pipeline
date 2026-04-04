@@ -665,6 +665,26 @@ class SnowflakeMetadataExtractor:
                         conn=conn,
                     )
                     
+                    if sf_config.get("source_query"):
+                        existing_cols = {col["name"] for col in metadata["columns"]}
+                        for key in table_config.get("merge_keys", []):
+                            if key not in existing_cols:
+                                metadata["columns"].append({
+                                    "name": key,
+                                    "data_type": "DATE",
+                                    "is_nullable": True,
+                                    "default_value": None,
+                                    "max_length": None,
+                                    "precision": None,
+                                    "scale": None,
+                                    "position": len(metadata["columns"]) + 1,
+                                    "postgres_type": "DATE",
+                                })
+                                logger.info(
+                                    f"Added synthetic column '{key}' (from source_query) "
+                                    f"to metadata for {table_name}"
+                                )
+                    
                     if index_columns:
                         try:
                             validate_index_configuration(table_name, index_columns, metadata)

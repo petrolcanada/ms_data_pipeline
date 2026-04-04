@@ -13,7 +13,10 @@ import sys
 import json
 import argparse
 import hashlib
+import logging
 import shutil
+import time
+import uuid
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, List
@@ -94,15 +97,11 @@ def export_table(
     
     use_obfuscation = obfuscator is not None
     
-    # Compact header
-    progress = f"[{table_index}/{total_tables}]" if total_tables else ""
-    print(f"\n  {progress}  {table_name}")
-    
     folder_name = obfuscator.generate_folder_id(table_name) if use_obfuscation else table_name
     
     export_dir = Path(export_base_dir) / "data" / "encrypted" / folder_name
     export_dir.mkdir(parents=True, exist_ok=True)
-    logger.info(f"Export directory: {export_dir}")
+    logger.debug(f"Export directory: {export_dir}")
     
     extractor = SnowflakeDataExtractor(conn_manager)
     encryptor = FileEncryptor()
@@ -135,7 +134,7 @@ def export_table(
     watermark_value = None
     if sync_mode in ("incremental", "upsert") and watermark_column:
         if full_reload:
-            logger.info(f"Full reload: ignoring watermark for {table_name}")
+            logger.debug(f"Full reload: ignoring watermark for {table_name}")
         else:
             watermark_value = watermark_mgr.get_watermark(table_name)
             if watermark_value:
@@ -149,7 +148,7 @@ def export_table(
     else:
         base_query = f"SELECT * FROM {fqn}"
     full_query = f"{base_query} {filter_clause}" if filter_clause else base_query
-    logger.info(f"Query: {full_query}")
+    logger.debug(f"Query: {full_query}")
     
     # Estimate table size
     size_info = extractor.estimate_table_size(
@@ -162,13 +161,12 @@ def export_table(
     estimated_rows = size_info['row_count']
     estimated_mb = size_info['size_mb']
     
-    # Print mode info on one line
     mode_parts = [sync_mode]
     if full_reload:
         mode_parts.append("full-reload")
     elif watermark_value:
         mode_parts.append(f"from {watermark_value}")
-    print(f"          {estimated_rows:,} rows est. | {', '.join(mode_parts)}")
+    logger.debug(f"{table_name}: {estimated_rows:,} rows est. | {', '.join(mode_parts)}")
     
     chunks_metadata = []
     chunk_num = 0
@@ -322,8 +320,7 @@ def export_table(
                 
                 if new_manifest_hash == existing_manifest_hash:
                     manifest_needs_write = False
-                    print(f"\n✅ Manifest unchanged - skipping write")
-                    logger.info("Manifest content unchanged - skipping write")
+                    logger.debug("Manifest content unchanged - skipping write")
         
         if manifest_needs_write:
             # Save as temporary JSON
@@ -331,14 +328,13 @@ def export_table(
             with open(temp_manifest, 'w') as f:
                 f.write(manifest_json)
             
-            # Encrypt manifest
-            print(f"\n🔐 Encrypting manifest as {manifest_file.name}...")
+            logger.debug(f"Encrypting manifest as {manifest_file.name}")
             encryptor.encrypt_file(temp_manifest, manifest_file, password)
             
             # Remove temporary file
             temp_manifest.unlink()
             
-            logger.info(f"Manifest encrypted: {manifest_file}")
+            logger.debug(f"Manifest encrypted: {manifest_file}")
     else:
         # Plain JSON manifest (backward compatibility)
         manifest_file = export_dir / "manifest.json"
@@ -357,8 +353,7 @@ def export_table(
                 
                 if new_hash == existing_hash:
                     manifest_needs_write = False
-                    print(f"\n✅ Manifest unchanged - skipping write")
-                    logger.info("Manifest content unchanged - skipping write")
+                    logger.debug("Manifest content unchanged - skipping write")
             except Exception as e:
                 logger.warning(f"Failed to compare manifest: {e}")
                 manifest_needs_write = True
@@ -378,9 +373,8 @@ def export_table(
     raw_manifest_file = raw_dir / f"{table_name}_manifest.json"
     with open(raw_manifest_file, 'w') as f:
         f.write(manifest_json)
-    logger.info(f"Raw manifest saved: {raw_manifest_file}")
+    logger.debug(f"Raw manifest saved: {raw_manifest_file}")
     
-    # Compact result line
     change_parts = []
     if stats.chunks_new:
         change_parts.append(f"{stats.chunks_new} new")
@@ -389,8 +383,8 @@ def export_table(
     if stats.chunks_unchanged:
         change_parts.append(f"{stats.chunks_unchanged} unchanged")
     change_summary = ", ".join(change_parts) if change_parts else "no chunks"
-    
-    print(f"          {total_rows:,} rows -> {chunk_num} chunk(s) ({total_size / (1024*1024):.2f} MB) | {change_summary}")
+    logger.debug(f"{table_name}: {total_rows:,} rows -> {chunk_num} chunk(s) "
+                 f"({total_size / (1024*1024):.2f} MB) | {change_summary}")
     
     # Update watermark
     if sync_mode in ("incremental", "upsert") and watermark_column and total_rows > 0:
@@ -401,7 +395,7 @@ def export_table(
             rows_exported=total_rows,
             export_timestamp=manifest["export_timestamp"],
         )
-        logger.info(f"Watermark updated for {table_name}: {effective_watermark}")
+        logger.debug(f"Watermark updated for {table_name}: {effective_watermark}")
     
     return {
         "table_name": table_name,
@@ -413,6 +407,7 @@ def export_table(
         "total_size_bytes": total_size,
         "sync_mode": sync_mode,
         "stats": stats,
+        "query": full_query,
     }
 
 
@@ -497,6 +492,12 @@ def main():
     try:
         # Get settings
         settings = get_settings()
+        
+        # Keep console clean — only explicit print() shows; logger output goes to pipeline.log only
+        for handler in logging.getLogger().handlers:
+            if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
+                handler.setLevel(logging.ERROR)
+        
         export_base_dir = getattr(settings, 'export_base_dir', 'exports')
         
         # Get compression settings from environment
@@ -540,15 +541,11 @@ def main():
             remote_url=settings.dataset_repo_url,
         )
         
-        # Wipe only the table folders about to be re-exported
+        # Wipe data/ completely so the repo only contains the tables
+        # exported in this run.  Metadata is kept for history/diffing.
         data_dir = Path(export_base_dir) / "data"
-        enc_dir = data_dir / "encrypted"
-        if enc_dir.exists():
-            for tc in table_configs:
-                folder = obfuscator.generate_folder_id(tc['name']) if obfuscator else tc['name']
-                table_dir = enc_dir / folder
-                if table_dir.exists():
-                    shutil.rmtree(str(table_dir), onerror=_force_remove_readonly)
+        if data_dir.exists():
+            shutil.rmtree(str(data_dir), onerror=_force_remove_readonly)
         data_dir.mkdir(parents=True, exist_ok=True)
         (data_dir / "encrypted").mkdir(exist_ok=True)
         (data_dir / "raw").mkdir(exist_ok=True)
@@ -594,8 +591,14 @@ def main():
                 print(f"  Metadata: {', '.join(parts)}")
             
             export_results = []
+            failed_tables = []
+            run_start = time.time()
             
+            n = len(table_configs)
             for i, table_config in enumerate(table_configs, 1):
+                table_name = table_config['name']
+                print(f"  [{i}/{n}] {table_name} ...", end="", flush=True)
+                t0 = time.time()
                 try:
                     export_result = export_table(
                         table_config,
@@ -610,25 +613,112 @@ def main():
                         use_dictionary_encoding=use_dict_encoding,
                         full_reload=args.full_reload,
                         table_index=i,
-                        total_tables=len(table_configs),
+                        total_tables=n,
                     )
+                    elapsed = time.time() - t0
+                    export_result['elapsed_seconds'] = elapsed
+                    print(f" OK ({elapsed:.1f}s)")
                     export_results.append(export_result)
                 except Exception as e:
-                    logger.error(f"Failed to export {table_config['name']}: {e}")
-                    print(f"\n  [!] FAILED: {table_config['name']}: {e}")
+                    elapsed = time.time() - t0
+                    logger.error(f"Failed to export {table_name}: {e}")
+                    print(f" FAILED ({elapsed:.1f}s)")
+                    failed_tables.append({
+                        "table_name": table_name,
+                        "error": str(e),
+                        "elapsed_seconds": elapsed,
+                    })
         
-        # Summary
-        if export_results:
-            total_rows = sum(r['total_rows'] for r in export_results)
-            total_bytes = sum(r.get('total_size_bytes', 0) for r in export_results)
-            total_new = sum(r['stats'].chunks_new for r in export_results)
-            total_changed = sum(r['stats'].chunks_changed for r in export_results)
-            total_unchanged = sum(r['stats'].chunks_unchanged for r in export_results)
-            
-            print(f"\n{'=' * 70}")
-            print(f"DONE  {len(export_results)} table(s) | {total_rows:,} rows | {total_bytes / (1024*1024):.2f} MB")
-            print(f"  New: {total_new} | Changed: {total_changed} | Unchanged: {total_unchanged}")
-            print(f"{'=' * 70}")
+        # Write run log to logs/ (git-ignored)
+        run_elapsed = time.time() - run_start
+        logs_dir = Path("logs")
+        logs_dir.mkdir(exist_ok=True)
+        run_log = {
+            "run_timestamp": datetime.now().astimezone().isoformat(),
+            "elapsed_seconds": round(run_elapsed, 1),
+            "tables": [
+                {
+                    "name": r["table_name"],
+                    "status": "ok",
+                    "rows": r["total_rows"],
+                    "size_mb": round(r.get("total_size_bytes", 0) / (1024*1024), 2),
+                    "chunks": {
+                        "total": r["total_chunks"],
+                        "new": r["stats"].chunks_new,
+                        "changed": r["stats"].chunks_changed,
+                        "unchanged": r["stats"].chunks_unchanged,
+                    },
+                    "elapsed_seconds": round(r.get("elapsed_seconds", 0), 1),
+                    "sync_mode": r.get("sync_mode"),
+                    "query": r.get("query"),
+                }
+                for r in export_results
+            ] + [
+                {
+                    "name": ft["table_name"],
+                    "status": "failed",
+                    "error": ft["error"],
+                    "elapsed_seconds": round(ft["elapsed_seconds"], 1),
+                }
+                for ft in failed_tables
+            ],
+        }
+        run_log_file = logs_dir / f"export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        with open(run_log_file, 'w') as f:
+            json.dump(run_log, f, indent=2, default=str)
+        
+        # Summary table
+        all_rows = []
+        for r in export_results:
+            all_rows.append((
+                r['table_name'],
+                f"{r['total_rows']:,}",
+                f"{r['total_size_bytes']/(1024*1024):.1f} MB",
+                f"{r['elapsed_seconds']:.1f}s",
+                "OK",
+            ))
+        for ft in failed_tables:
+            err_brief = str(ft['error']).split('\n')[0][:60]
+            all_rows.append((
+                ft['table_name'],
+                "-",
+                "-",
+                f"{ft['elapsed_seconds']:.1f}s",
+                f"FAILED: {err_brief}",
+            ))
+        
+        headers = ("Table", "Rows", "Size", "Time", "Status")
+        col_w = [
+            max(len(headers[i]), *(len(r[i]) for r in all_rows))
+            for i in range(len(headers))
+        ]
+        
+        def _fmt_row(cols):
+            return "  ".join(
+                cols[i].ljust(col_w[i]) if i == 0
+                else cols[i].rjust(col_w[i]) if i < 4
+                else cols[i]
+                for i in range(len(cols))
+            )
+        
+        run_elapsed_fmt = (f"{int(run_elapsed//60)}m {run_elapsed%60:.0f}s"
+                           if run_elapsed >= 60 else f"{run_elapsed:.1f}s")
+        sep = "-" * sum(col_w[:4]) + "-" * (2 * 3) + "-" * max(col_w[4], 6)
+        
+        print(f"\n{sep}")
+        print(_fmt_row(headers))
+        print(sep)
+        for row in all_rows:
+            print(_fmt_row(row))
+        print(sep)
+        n_ok, n_fail = len(export_results), len(failed_tables)
+        total_rows = sum(r['total_rows'] for r in export_results)
+        total_bytes = sum(r.get('total_size_bytes', 0) for r in export_results)
+        status = f"{n_ok}/{n_ok + n_fail} OK" if n_fail else f"{n_ok} OK"
+        print(f"  {status} | {total_rows:,} rows | "
+              f"{total_bytes/(1024*1024):.1f} MB | {run_elapsed_fmt}")
+        print(f"  Run log: {run_log_file}")
+        print(sep)
         
         # --- Post-export: archive / repo / bundle ---
         
@@ -655,8 +745,7 @@ def main():
                 password=password if use_obfuscation else None,
             )
             
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-            commit_msg = f"{delivery['run_purpose']} [{timestamp}]"
+            commit_msg = uuid.uuid4().hex[:12]
             sha = repo_manager.commit(commit_msg)
             print(f"\n  Committed: {sha[:8] if sha else '(no changes)'}")
         

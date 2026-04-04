@@ -169,7 +169,10 @@ class DatasetRepoManager:
     # ------------------------------------------------------------- committing
     def commit(self, message: str) -> Optional[str]:
         """
-        Stage all files and commit.
+        Stage all files and create a single orphan commit (no history).
+
+        Every call replaces the entire history with one commit so the
+        repo never accumulates old data.  Requires ``--force`` push.
 
         Returns the commit SHA, or None if nothing to commit.
         """
@@ -178,8 +181,11 @@ class DatasetRepoManager:
             logger.info("Nothing to commit")
             return None
 
+        _run_git(["checkout", "--orphan", "_orphan"], cwd=self.repo_dir)
         _run_git(["add", "."], cwd=self.repo_dir)
         _run_git(["commit", "-m", message], cwd=self.repo_dir)
+        _run_git(["branch", "-D", "main"], cwd=self.repo_dir, check=False)
+        _run_git(["branch", "-m", "main"], cwd=self.repo_dir)
 
         sha = _run_git(["rev-parse", "HEAD"], cwd=self.repo_dir).stdout.strip()
         logger.info(f"Committed {sha[:8]}: {message}")
@@ -231,7 +237,7 @@ class DatasetRepoManager:
             logger.info(f"Renamed local branch {branch} -> {remote_default} to match remote")
             branch = remote_default
 
-        _run_git(["push", "-u", remote_name, branch], cwd=self.repo_dir)
+        _run_git(["push", "--force", "-u", remote_name, branch], cwd=self.repo_dir)
 
         sha = _run_git(["rev-parse", "--short", "HEAD"], cwd=self.repo_dir).stdout.strip()
         logger.info(f"Pushed {branch} @ {sha} to {remote_name}")

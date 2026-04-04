@@ -1,8 +1,8 @@
 {
   "table_name": "FUND_SHARE_CLASS_BASIC_INFO_CA_OPENEND",
-  "watermark_value": "2026-04-03 05:05:30.199000+00:00",
-  "rows_exported": 71616,
-  "updated_at": "2026-04-03T20:35:55.489824-04:00",
+  "watermark_value": "2026-03-30 05:05:07.080000+00:00",
+  "rows_exported": 80152,
+  "updated_at": "2026-04-04T12:05:22.662396-04:00",
   "history": [
     {
       "watermark_value": "2026-04-03 05:05:30.199000+00:00",
@@ -13,6 +13,26 @@
       "watermark_value": "2026-04-03 05:05:30.199000+00:00",
       "rows_exported": 71617,
       "updated_at": "2026-04-03T19:30:05.454395-04:00"
+    },
+    {
+      "watermark_value": "2026-04-03 05:05:30.199000+00:00",
+      "rows_exported": 71616,
+      "updated_at": "2026-04-03T20:35:55.489824-04:00"
+    },
+    {
+      "watermark_value": "2026-03-30 05:05:07.080000+00:00",
+      "rows_exported": 80152,
+      "updated_at": "2026-04-03T23:31:32.864625-04:00"
+    },
+    {
+      "watermark_value": "2026-03-30 05:05:07.080000+00:00",
+      "rows_exported": 80152,
+      "updated_at": "2026-04-04T11:53:54.462422-04:00"
+    },
+    {
+      "watermark_value": "2026-03-30 05:05:07.080000+00:00",
+      "rows_exported": 80152,
+      "updated_at": "2026-04-04T11:58:54.218043-04:00"
     }
   ]
 }

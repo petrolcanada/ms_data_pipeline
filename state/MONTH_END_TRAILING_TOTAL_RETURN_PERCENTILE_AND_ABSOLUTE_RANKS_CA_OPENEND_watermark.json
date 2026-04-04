@@ -1,7 +1,28 @@
 {
   "table_name": "MONTH_END_TRAILING_TOTAL_RETURN_PERCENTILE_AND_ABSOLUTE_RANKS_CA_OPENEND",
-  "watermark_value": "2026-04-03 05:05:30.199739+00:00",
-  "rows_exported": 84380,
-  "updated_at": "2026-04-03T22:04:58.650383Z",
-  "history": []
+  "watermark_value": "2026-04-04 05:05:02.506462+00:00",
+  "rows_exported": 84432,
+  "updated_at": "2026-04-04T12:06:13.631948-04:00",
+  "history": [
+    {
+      "watermark_value": "2026-04-03 05:05:30.199739+00:00",
+      "rows_exported": 84380,
+      "updated_at": "2026-04-03T22:04:58.650383Z"
+    },
+    {
+      "watermark_value": "2026-04-03 05:05:30.199739+00:00",
+      "rows_exported": 84380,
+      "updated_at": "2026-04-03T23:32:40.560044-04:00"
+    },
+    {
+      "watermark_value": "2026-04-04 05:05:02.506462+00:00",
+      "rows_exported": 84432,
+      "updated_at": "2026-04-04T11:55:02.896205-04:00"
+    },
+    {
+      "watermark_value": "2026-04-04 05:05:02.506462+00:00",
+      "rows_exported": 84432,
+      "updated_at": "2026-04-04T11:59:45.781311-04:00"
+    }
+  ]
 }

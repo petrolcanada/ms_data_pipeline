@@ -159,11 +159,8 @@ class SnowflakeDataExtractor:
                 ) AS filtered_data
                 """
                 
-                # Log and print query BEFORE execution
-                logger.info(f"Estimating filtered table size...")
-                logger.info(f"  Count query: {count_query.strip()}")
-                print(f"\n🔍 Executing count query:")
-                print(f"{count_query.strip()}")
+                logger.debug(f"Estimating filtered table size...")
+                logger.debug(f"  Count query: {count_query.strip()}")
                 
                 # Now execute
                 cursor.execute(count_query)
@@ -313,12 +310,9 @@ class SnowflakeDataExtractor:
             # Log and print query BEFORE execution
             logger.info(f"Extracting data from {database}.{schema}.{table}")
             if filter_clause:
-                logger.info(f"  Filter: {filter_clause}")
-            logger.info(f"  Chunk size: {chunk_size:,} rows")
-            logger.info(f"  Full query: {query}")
-            
-            print(f"\n🔍 Executing data extraction query:")
-            print(f"{query}")
+                logger.debug(f"  Filter: {filter_clause}")
+            logger.debug(f"  Chunk size: {chunk_size:,} rows")
+            logger.debug(f"  Full query: {query}")
             
             # Execute query
             cursor.execute(query)

@@ -1,29 +1,9 @@
 {
   "table_name": "FUND_ATTRIBUTES_CA_OPENEND",
-  "watermark_value": "2026-04-03 05:05:30.199000+00:00",
-  "rows_exported": 20321,
-  "updated_at": "2026-04-03T20:36:01.781139-04:00",
+  "watermark_value": "2026-03-30 05:05:07.080000+00:00",
+  "rows_exported": 71154,
+  "updated_at": "2026-04-04T12:05:27.865736-04:00",
   "history": [
-    {
-      "watermark_value": "2026-04-03 05:05:30.199000+00:00",
-      "rows_exported": 20321,
-      "updated_at": "2026-04-03T22:03:52.038083Z"
-    },
-    {
-      "watermark_value": "2026-04-03 05:05:30.199000+00:00",
-      "rows_exported": 20321,
-      "updated_at": "2026-04-03T22:25:24.306607Z"
-    },
-    {
-      "watermark_value": "2026-04-03 05:05:30.199000+00:00",
-      "rows_exported": 20321,
-      "updated_at": "2026-04-03T22:26:17.006732Z"
-    },
-    {
-      "watermark_value": "2026-04-03 05:05:30.199000+00:00",
-      "rows_exported": 20321,
-      "updated_at": "2026-04-03T22:29:05.985450Z"
-    },
     {
       "watermark_value": "2026-04-03 05:05:30.199000+00:00",
       "rows_exported": 20321,
@@ -53,6 +33,26 @@
       "watermark_value": "2026-04-03 05:05:30.199000+00:00",
       "rows_exported": 20321,
       "updated_at": "2026-04-03T19:30:07.940291-04:00"
+    },
+    {
+      "watermark_value": "2026-04-03 05:05:30.199000+00:00",
+      "rows_exported": 20321,
+      "updated_at": "2026-04-03T20:36:01.781139-04:00"
+    },
+    {
+      "watermark_value": "2026-03-30 05:05:07.080000+00:00",
+      "rows_exported": 71154,
+      "updated_at": "2026-04-03T23:31:41.667118-04:00"
+    },
+    {
+      "watermark_value": "2026-03-30 05:05:07.080000+00:00",
+      "rows_exported": 71154,
+      "updated_at": "2026-04-04T11:54:01.792086-04:00"
+    },
+    {
+      "watermark_value": "2026-03-30 05:05:07.080000+00:00",
+      "rows_exported": 71154,
+      "updated_at": "2026-04-04T11:58:59.048157-04:00"
     }
   ]
 }
