@@ -114,7 +114,8 @@ def export_table(
     # Build filter and watermark — auto-generate QUALIFY from merge_keys
     filter_config = sf_config.get('filter')
 
-    if merge_keys and not source_query:
+    source_has_qualify = source_query and "QUALIFY" in source_query.upper()
+    if merge_keys and not source_has_qualify:
         order_col = table_config.get("qualify_order_by", "_TIMESTAMPTO")
         partition_cols = ", ".join(merge_keys)
         qualify = (
