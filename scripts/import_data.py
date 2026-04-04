@@ -228,7 +228,7 @@ def _load_manifest(import_dir: Path, table_name: str, password: str, obfuscated:
 
 def _prepare_from_pull(settings):
     """
-    Pull from the remote dataset repo.
+    Pull from the remote dataset repo into IMPORT_BASE_DIR.
 
     Returns the DatasetRepoManager instance (caller reads the
     delivery manifest from it).
@@ -236,11 +236,11 @@ def _prepare_from_pull(settings):
     from pipeline.utils.repo_manager import DatasetRepoManager
 
     mgr = DatasetRepoManager(
-        repo_dir=settings.dataset_repo_dir,
+        repo_dir=settings.import_base_dir,
         remote_url=settings.dataset_repo_url,
     )
 
-    print(f"\n  Pulling dataset repo from {settings.dataset_repo_url} ...")
+    print(f"\n  Pulling into {settings.import_base_dir} ...")
     info = mgr.pull()
     print(f"  Ready: {info['branch']} @ {info['head']}")
     print(f"  Purpose: {info['commit_message']}")
@@ -315,10 +315,9 @@ def main():
         import_base_dir = settings.import_base_dir
         password = settings.encryption_password
 
-        # --pull: pull dataset repo, read delivery manifest, auto-import
+        # --pull: pull dataset repo into IMPORT_BASE_DIR, read delivery manifest, auto-import
         if args.pull:
             repo_mgr = _prepare_from_pull(settings)
-            import_base_dir = settings.dataset_repo_dir
 
             manifest = repo_mgr.read_delivery_manifest(password)
             manifest_tables = manifest.get("tables", [])

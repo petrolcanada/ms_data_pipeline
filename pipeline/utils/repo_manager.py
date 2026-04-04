@@ -309,24 +309,38 @@ class DatasetRepoManager:
 
     def pull(self, remote_name: str = "origin") -> Dict[str, Any]:
         """
-        Pull the latest delivery from the remote.
+        Sync to the latest remote state.
 
-        Since the producer resets the repo each run (new root commit
-        every time), the consumer also does a fresh shallow clone.
-        If a local copy exists it is deleted first.
+        * If the repo already exists: fetch + hard-reset (works whether
+          the remote history is persistent or ephemeral/orphan).
+        * If the repo does not exist: shallow clone.
         """
         if not self.remote_url:
             raise ValueError("No remote URL configured (set DATASET_REPO_URL in .env)")
 
-        if self.repo_dir.exists():
-            shutil.rmtree(str(self.repo_dir), onerror=_force_remove_readonly)
-            logger.info(f"Removed existing local repo: {self.repo_dir}")
+        git_dir = self.repo_dir / ".git"
 
-        self.repo_dir.parent.mkdir(parents=True, exist_ok=True)
-        _run_git(
-            ["clone", "--depth", "1", self.remote_url, str(self.repo_dir.resolve())],
-            cwd=self.repo_dir.parent,
-        )
+        if git_dir.exists():
+            # Ensure remote URL is current
+            result = _run_git(["remote"], cwd=self.repo_dir)
+            remotes = result.stdout.strip().splitlines()
+            if remote_name in remotes:
+                _run_git(["remote", "set-url", remote_name, self.remote_url], cwd=self.repo_dir)
+            else:
+                _run_git(["remote", "add", remote_name, self.remote_url], cwd=self.repo_dir)
+
+            _run_git(["fetch", remote_name], cwd=self.repo_dir)
+
+            branch = self._detect_remote_default_branch(remote_name) or "main"
+            _run_git(["reset", "--hard", f"{remote_name}/{branch}"], cwd=self.repo_dir)
+            logger.info(f"Fetched and reset to {remote_name}/{branch}")
+        else:
+            self.repo_dir.parent.mkdir(parents=True, exist_ok=True)
+            _run_git(
+                ["clone", "--depth", "1", self.remote_url, str(self.repo_dir.resolve())],
+                cwd=self.repo_dir.parent,
+            )
+            logger.info(f"Cloned {self.remote_url} into {self.repo_dir}")
 
         sha = _run_git(["rev-parse", "--short", "HEAD"], cwd=self.repo_dir).stdout.strip()
         branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=self.repo_dir).stdout.strip()
