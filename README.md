@@ -25,24 +25,67 @@ A metadata-driven ETL pipeline that extracts Morningstar financial data from Sno
 
 ## Quick Start
 
+### First-Time Setup
+
+> Complete steps 1-6 in order. Steps 2-3 run on the **VPN-side machine** (Snowflake access). Steps 5-6 run on the **external-side machine** (PostgreSQL access).
+
+**1. Configure tables**
+
+Edit `config/tables.yaml` to define which tables to sync, their sync mode, merge keys, and filters.
+
+**2. Extract metadata from Snowflake** _(VPN side)_
+
 ```bash
-# 1. Configure tables (sync mode, merge keys, watermarks)
-#    Edit config/tables.yaml
-
-# 2. Extract metadata from Snowflake (VPN side)
 python scripts/extract_metadata.py --all
+```
 
-# 3. Export data to encrypted Parquet (VPN side)
+Connects to Snowflake, discovers schemas and primary keys, and generates PostgreSQL DDL.
+
+**3. Export data** _(VPN side)_
+
+```bash
 python scripts/export_data.py --all
+```
 
-# 4. Transfer files to PostgreSQL host (manual step)
+Queries Snowflake, writes chunked Parquet files, and encrypts them with AES-GCM.
 
-# 5. Create PostgreSQL tables (external side)
+**4. Transfer files** _(manual)_
+
+Copy the `metadata/`, `config/`, and export directories from the VPN-side machine to the PostgreSQL host. For Git-based delivery, see [Git Delivery](#git-delivery).
+
+**5. Create PostgreSQL tables** _(external side)_
+
+```bash
 python scripts/extract_metadata.py --all --create-postgres --drop-existing
+```
 
-# 6. Import data into PostgreSQL (external side)
+Runs the generated DDL against PostgreSQL. Only needed on first run or when schema changes are detected.
+
+**6. Import data** _(external side)_
+
+```bash
 python scripts/import_data.py --all
 ```
+
+Decrypts Parquet files and loads them into PostgreSQL via COPY or upsert (depending on sync mode).
+
+---
+
+### Day-to-Day (Incremental Sync)
+
+Once tables exist in PostgreSQL, subsequent syncs only need steps 3, 4, and 6. The pipeline automatically uses watermarks to extract only new/changed rows.
+
+```bash
+# VPN side — export only rows newer than the last watermark
+python scripts/export_data.py --all
+
+# (transfer files)
+
+# External side — import (upsert/append, no truncation)
+python scripts/import_data.py --all
+```
+
+To force a full re-export ignoring watermarks, add `--full-reload`. To truncate PostgreSQL tables before loading, add `--truncate` to the import command.
 
 ## Sync Modes
 
@@ -379,10 +422,10 @@ API_SECRET_KEY=your_api_secret_key
 
 ```bash
 # Test Snowflake (requires VPN) — SSO will open a browser window
-python -c "from pipeline.extractors.metadata_extractor import SnowflakeMetadataExtractor; SnowflakeMetadataExtractor().connect_to_snowflake()"
+python -c "from pipeline.connections import SnowflakeConnectionManager; SnowflakeConnectionManager().connect()"
 
 # Test PostgreSQL
-python -c "from pipeline.loaders.postgres_loader import PostgreSQLLoader; PostgreSQLLoader().connect_to_postgres()"
+python -c "from pipeline.connections import PostgresConnectionManager; PostgresConnectionManager().connect()"
 ```
 
 ## Password Management
@@ -401,16 +444,6 @@ All scripts use the `ENCRYPTION_PASSWORD` value from `.env`. Set it once and all
 | Schema change not detected | Run with `--force` to re-extract regardless of cache |
 | Git repo growing too large | Repo is reset each run so this shouldn't happen; check `REPO_MODE=repo` |
 | Decrypted files accidentally committed | Run `python scripts/decrypt_metadata.py --clean`; they are in `.gitignore` |
-
-### Connection Tests
-
-```bash
-# Test Snowflake (requires VPN)
-python -c "from pipeline.connections import SnowflakeConnectionManager; SnowflakeConnectionManager().connect()"
-
-# Test PostgreSQL
-python -c "from pipeline.connections import PostgresConnectionManager; PostgresConnectionManager().connect()"
-```
 
 ## Git Tracking Strategy
 
