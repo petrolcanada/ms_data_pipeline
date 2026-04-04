@@ -34,7 +34,6 @@ def main():
     print(f"Mode     : {'dry-run (commit only)' if dry_run else 'commit + push'}")
     print()
 
-    # 1. ensure_init (persistent mode)
     mgr.ensure_init()
     print("[ok] ensure_init")
 

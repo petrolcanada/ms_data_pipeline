@@ -1,44 +1,24 @@
 """
 Dataset Repo Manager
-Manages a Git repository for encrypted data delivery.
+Manages the shared Git repository used for encrypted data delivery.
 
-Two repo modes (set via REPO_MODE env / --repo-mode CLI):
+The same repo lives on both sides:
 
-  **persistent** (default)
-    Long-living repo.  Each export commits on top of existing history.
-    Tables accumulate — running a single-table export only updates
-    that table; other tables from previous runs remain.
+  * **VPN side** (``EXPORT_BASE_DIR``) — data is exported here, then
+    committed and pushed.
+  * **PSQL side** (``IMPORT_BASE_DIR``) — ``git pull``, then import.
 
-  **ephemeral**
-    Disposable repo.  ``reset()`` nukes and re-inits before each run
-    so the commit has no parent — a clean delivery envelope.
+Producer (VPN/Snowflake side)::
 
-Two transport modes:
-  1. **Remote push/pull** — force-push to a shared Git remote from the
-     VPN side, shallow-clone on the PSQL side.
-  2. **Git bundles** — ``git bundle create`` for truly air-gapped transfer.
-
-Producer (VPN/Snowflake side) — persistent::
-
-    mgr = DatasetRepoManager("repos/dataset", "git@github.com:org/ms-data.git")
+    mgr = DatasetRepoManager(settings.export_base_dir, settings.dataset_repo_url)
     mgr.ensure_init()
-    mgr.stage_table(Path("exports/abc123"), "abc123")
     mgr.write_delivery_manifest(manifest, password="...")
     mgr.commit("upsert: FUND_MANAGER [2026-04-03 14:30]")
     mgr.push()
 
-Producer — ephemeral::
-
-    mgr = DatasetRepoManager("repos/dataset", "git@github.com:org/ms-data.git")
-    mgr.reset()          # nuke + git init
-    mgr.stage_table(...)
-    mgr.write_delivery_manifest(...)
-    mgr.commit("full: 14 tables [2026-04-03 14:30]")
-    mgr.push()
-
 Consumer (PostgreSQL side)::
 
-    mgr = DatasetRepoManager("repos/dataset", "git@github.com:org/ms-data.git")
+    mgr = DatasetRepoManager(settings.import_base_dir, settings.dataset_repo_url)
     mgr.pull()
     manifest = mgr.read_delivery_manifest(password="...")
 """
@@ -81,14 +61,7 @@ def _run_git(args: List[str], cwd: Path, check: bool = True) -> subprocess.Compl
 
 class DatasetRepoManager:
     """
-    Manage a Git repository for encrypted data delivery.
-
-    Supports two lifecycle modes:
-
-    * **persistent** — ``ensure_init()`` creates the repo only on first
-      run; subsequent runs commit on top of existing history.
-    * **ephemeral** — ``reset()`` nukes and re-inits so every commit
-      is an orphan root (clean delivery envelope).
+    Manage the shared Git repository for encrypted data delivery.
 
     The delivery manifest (``delivery_manifest.json`` or ``.enc``)
     contains everything the consumer needs: per-table sync modes,
@@ -102,13 +75,9 @@ class DatasetRepoManager:
         self.repo_dir = Path(repo_dir)
         self.remote_url = remote_url
 
-    # -------------------------------------------------------------- init modes
+    # ------------------------------------------------------------------ init
     def ensure_init(self):
-        """
-        Initialise the repo only if ``.git`` does not already exist.
-
-        Used in **persistent** mode so history is preserved across runs.
-        """
+        """Initialise the repo only if ``.git`` does not already exist."""
         self.repo_dir.mkdir(parents=True, exist_ok=True)
         git_dir = self.repo_dir / ".git"
         if not git_dir.exists():
@@ -116,40 +85,6 @@ class DatasetRepoManager:
             logger.info(f"Initialised new repo: {self.repo_dir}")
         else:
             logger.info(f"Using existing repo: {self.repo_dir}")
-
-    def reset(self):
-        """
-        Nuke the repo entirely and ``git init`` fresh.
-
-        Used in **ephemeral** mode — removes all files (including
-        ``.git``) so the next commit has no parent.
-        """
-        if self.repo_dir.exists():
-            shutil.rmtree(str(self.repo_dir), onerror=_force_remove_readonly)
-            logger.info(f"Removed existing repo: {self.repo_dir}")
-
-        self.repo_dir.mkdir(parents=True, exist_ok=True)
-        _run_git(["init"], cwd=self.repo_dir)
-        logger.info(f"Initialised fresh repo: {self.repo_dir}")
-
-    # --------------------------------------------------------------- staging
-    def stage_table(self, source_dir: Path, dest_folder: str):
-        """
-        Copy a table's export folder into the repo.
-
-        Args:
-            source_dir: Path to the export folder (e.g. ``exports/<folder_id>``).
-            dest_folder: Folder name to use inside the repo.
-        """
-        source_dir = Path(source_dir)
-        if not source_dir.is_dir():
-            raise FileNotFoundError(f"Export directory not found: {source_dir}")
-
-        dest = self.repo_dir / dest_folder
-        if dest.exists():
-            shutil.rmtree(str(dest))
-        shutil.copytree(str(source_dir), str(dest))
-        logger.info(f"Staged {dest_folder} into dataset repo")
 
     # ------------------------------------------------------------ manifest
     def write_delivery_manifest(
@@ -251,45 +186,14 @@ class DatasetRepoManager:
         return sha
 
     # --------------------------------------------------------- remote push/pull
-    def push(self, remote_name: str = "origin", force: bool = True) -> Dict[str, Any]:
-        """
-        Force-push to the configured remote.
-
-        Since the repo is reset each run, force-push is required
-        (the local history is always unrelated to the remote).
-
-        Automatically detects the remote's default branch and renames
-        the local branch to match (e.g. ``git init`` creates ``master``
-        but GitHub defaults to ``main``).
-        """
-        if not self.remote_url:
-            raise ValueError("No remote URL configured (set DATASET_REPO_URL in .env)")
-
+    def _ensure_remote(self, remote_name: str):
+        """Add or update the remote URL."""
         result = _run_git(["remote"], cwd=self.repo_dir)
         remotes = result.stdout.strip().splitlines()
         if remote_name in remotes:
             _run_git(["remote", "set-url", remote_name, self.remote_url], cwd=self.repo_dir)
         else:
             _run_git(["remote", "add", remote_name, self.remote_url], cwd=self.repo_dir)
-
-        branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=self.repo_dir).stdout.strip()
-
-        remote_default = self._detect_remote_default_branch(remote_name)
-        if remote_default and remote_default != branch:
-            _run_git(["branch", "-m", branch, remote_default], cwd=self.repo_dir)
-            logger.info(f"Renamed local branch {branch} -> {remote_default} to match remote")
-            branch = remote_default
-
-        args = ["push", "-u", remote_name, branch]
-        if force:
-            args.insert(1, "--force")
-
-        _run_git(args, cwd=self.repo_dir)
-
-        sha = _run_git(["rev-parse", "--short", "HEAD"], cwd=self.repo_dir).stdout.strip()
-        logger.info(f"Pushed dataset repo ({branch} @ {sha}) to {remote_name}")
-
-        return {"branch": branch, "head": sha, "remote": remote_name}
 
     def _detect_remote_default_branch(self, remote_name: str) -> Optional[str]:
         """Query the remote for its default branch (the target of HEAD)."""
@@ -302,51 +206,51 @@ class DatasetRepoManager:
             return None
         for line in result.stdout.splitlines():
             if line.startswith("ref:"):
-                # "ref: refs/heads/main\tHEAD"
                 ref = line.split()[1]
                 return ref.replace("refs/heads/", "")
         return None
 
-    def pull(self, remote_name: str = "origin") -> Dict[str, Any]:
+    def push(self, remote_name: str = "origin") -> Dict[str, Any]:
         """
-        Sync to the latest remote state.
+        Push to the configured remote.
 
-        * If the repo already exists: fetch + hard-reset (works whether
-          the remote history is persistent or ephemeral/orphan).
-        * If the repo does not exist: shallow clone.
+        Detects the remote's default branch and renames the local
+        branch to match if needed (e.g. ``git init`` creates ``master``
+        but GitHub defaults to ``main``).
         """
         if not self.remote_url:
             raise ValueError("No remote URL configured (set DATASET_REPO_URL in .env)")
 
-        git_dir = self.repo_dir / ".git"
+        self._ensure_remote(remote_name)
 
-        if git_dir.exists():
-            # Ensure remote URL is current
-            result = _run_git(["remote"], cwd=self.repo_dir)
-            remotes = result.stdout.strip().splitlines()
-            if remote_name in remotes:
-                _run_git(["remote", "set-url", remote_name, self.remote_url], cwd=self.repo_dir)
-            else:
-                _run_git(["remote", "add", remote_name, self.remote_url], cwd=self.repo_dir)
+        branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=self.repo_dir).stdout.strip()
 
-            _run_git(["fetch", remote_name], cwd=self.repo_dir)
+        remote_default = self._detect_remote_default_branch(remote_name)
+        if remote_default and remote_default != branch:
+            _run_git(["branch", "-m", branch, remote_default], cwd=self.repo_dir)
+            logger.info(f"Renamed local branch {branch} -> {remote_default} to match remote")
+            branch = remote_default
 
-            branch = self._detect_remote_default_branch(remote_name) or "main"
-            _run_git(["reset", "--hard", f"{remote_name}/{branch}"], cwd=self.repo_dir)
-            logger.info(f"Fetched and reset to {remote_name}/{branch}")
-        else:
-            self.repo_dir.parent.mkdir(parents=True, exist_ok=True)
-            _run_git(
-                ["clone", "--depth", "1", self.remote_url, str(self.repo_dir.resolve())],
-                cwd=self.repo_dir.parent,
-            )
-            logger.info(f"Cloned {self.remote_url} into {self.repo_dir}")
+        _run_git(["push", "-u", remote_name, branch], cwd=self.repo_dir)
+
+        sha = _run_git(["rev-parse", "--short", "HEAD"], cwd=self.repo_dir).stdout.strip()
+        logger.info(f"Pushed {branch} @ {sha} to {remote_name}")
+
+        return {"branch": branch, "head": sha, "remote": remote_name}
+
+    def pull(self, remote_name: str = "origin") -> Dict[str, Any]:
+        """Pull the latest commits from the remote."""
+        if not self.remote_url:
+            raise ValueError("No remote URL configured (set DATASET_REPO_URL in .env)")
+
+        self._ensure_remote(remote_name)
+        _run_git(["pull", remote_name], cwd=self.repo_dir)
 
         sha = _run_git(["rev-parse", "--short", "HEAD"], cwd=self.repo_dir).stdout.strip()
         branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=self.repo_dir).stdout.strip()
         commit_msg = _run_git(["log", "-1", "--format=%s"], cwd=self.repo_dir).stdout.strip()
 
-        logger.info(f"Pulled dataset repo: {branch} @ {sha}")
+        logger.info(f"Pulled: {branch} @ {sha}")
 
         return {
             "target_dir": str(self.repo_dir),

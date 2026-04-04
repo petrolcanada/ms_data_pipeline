@@ -219,19 +219,19 @@ The pipeline applies multiple layers of compression tuning to minimize transfer 
 
 Controlled via env vars (`SORT_BEFORE_COMPRESS`, `USE_DICTIONARY_ENCODING`, `COMPRESSION_LEVEL`) or CLI flags (`--no-sort`, `--no-dictionary`).
 
-### Git Delivery: Disposable Dataset Repo
+### Git Delivery
 
-For Git-based data delivery, the pipeline uses a single disposable repository that is completely reset each run — no history is preserved. The repo acts as a fresh data delivery envelope.
+The same Git repo lives on both sides — `EXPORT_BASE_DIR` on the VPN host and `IMPORT_BASE_DIR` on the PSQL host.
 
 ```
-Producer (VPN side)                          Consumer (external side)
+VPN side (EXPORT_BASE_DIR)                   PSQL side (IMPORT_BASE_DIR)
 ┌──────────────────────────────┐             ┌──────────────────────────────┐
-│  repos/dataset/              │  force-push │  repos/dataset/              │
-│    delivery_manifest.json    │────────────>│    delivery_manifest.json    │
-│    TABLE_A/  (encrypted)     │  (each run) │    TABLE_A/   shallow clone  │
-│    TABLE_B/  (encrypted)     │             │    TABLE_B/                  │
+│  ms_dataset/                 │  git push   │  ms_dataset_init/            │
+│    data/encrypted/           │────────────>│    data/encrypted/           │
+│    metadata/encrypted/       │             │    metadata/encrypted/       │
+│    delivery_manifest.enc     │             │    delivery_manifest.enc     │
 └──────────────────────────────┘             └──────────────────────────────┘
-         reset + commit                            clone --depth 1
+      export -> commit -> push                       git pull -> import
 ```
 
 - **Reset each run** — the repo is nuked and re-created from scratch; no history accumulates
@@ -293,30 +293,21 @@ python scripts/export_data.py --all --no-obfuscate
 # Compression tuning
 python scripts/export_data.py --all --no-sort --no-dictionary
 
-# Use ephemeral repo (nuke + re-init, no history preserved)
-python scripts/export_data.py --all --repo-mode ephemeral
 ```
 
 #### Git Delivery
 
-The pipeline supports two repo modes for controlling how the dataset repo is managed:
-
-| Mode | Behavior |
-|------|----------|
-| `persistent` | **(default)** Long-living repo. Each export commits on top of existing history. Running a single-table export only updates that table; other tables from previous runs remain. |
-| `ephemeral` | Disposable repo. Nuked and re-created from scratch each run. The repo always contains a single orphan commit (no history). |
-
-`--push` and `--bundle` work with both modes. Set the default via `REPO_MODE` in `.env`, or override per-run with `--repo-mode`.
+Every export automatically commits to `EXPORT_BASE_DIR`. Add `--push` to push the commit to the remote.
 
 ```bash
-# Commit to dataset repo + push to remote
+# Export + commit + push
 python scripts/export_data.py --all --push
 
 # With custom purpose in commit message / manifest
-python scripts/export_data.py --all --repo-mode repo --push --purpose "Q1 refresh"
+python scripts/export_data.py --all --push --purpose "Q1 refresh"
 
 # Air-gapped — create git bundle for offline transfer
-python scripts/export_data.py --all --repo-mode repo --bundle
+python scripts/export_data.py --all --bundle
 
 # Archive — tar.gz per table (no git required)
 python scripts/export_data.py --all --archive
@@ -431,8 +422,6 @@ API_SECRET_KEY=your_api_secret_key
 # USE_DICTIONARY_ENCODING=true        # Auto-detect low-cardinality dictionary columns
 
 # Git delivery
-# REPO_MODE=persistent                # persistent | ephemeral
-# DATASET_REPO_DIR=repos/dataset
 # DATASET_REPO_URL=git@github.com:org/ms-dataset.git
 # BUNDLE_OUTPUT_DIR=bundles
 ```
@@ -461,7 +450,7 @@ All scripts use the `ENCRYPTION_PASSWORD` value from `.env`. Set it once and all
 | "Encrypted file not found" | Verify files were transferred from Snowflake server; folder names are obfuscated |
 | Zero rows exported | Test your filter in Snowflake directly; check WHERE/QUALIFY logic |
 | Schema change not detected | Run with `--force` to re-extract regardless of cache |
-| Git repo growing too large | Use `--repo-mode ephemeral` for a clean single-commit repo each run, or run `git gc` on the persistent repo |
+| Git repo growing too large | Run `git gc` in the dataset repo, or add large generated files to `.gitignore` |
 | Decrypted files accidentally committed | Run `python scripts/decrypt_metadata.py --clean`; they are in `.gitignore` |
 
 ## Git Tracking Strategy

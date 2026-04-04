@@ -474,12 +474,6 @@ def main():
         help="Create a tar.gz archive per table for single-file transport"
     )
     parser.add_argument(
-        "--repo-mode",
-        choices=["persistent", "ephemeral"],
-        default=None,
-        help="Git delivery: 'persistent' (default, long-living repo with history) or 'ephemeral' (disposable repo, reset each run)"
-    )
-    parser.add_argument(
         "--bundle",
         action="store_true",
         help="Create a git bundle for air-gapped transfer after committing"
@@ -513,9 +507,6 @@ def main():
         sort_before_compress = settings.sort_before_compress and not args.no_sort
         use_dict_encoding = settings.use_dictionary_encoding and not args.no_dictionary
         
-        # Repo mode: CLI flag > env > default
-        repo_mode = args.repo_mode or settings.repo_mode
-        
         # Determine if obfuscation should be enabled
         if args.no_obfuscate:
             use_obfuscation = False
@@ -530,7 +521,7 @@ def main():
         
         obfuscator = DataObfuscator() if use_obfuscation else None
         
-        # Determine tables to export (needed before per-table wipe)
+        # Determine tables to export
         if args.table:
             table_configs = [
                 t for t in config['tables'] if t['name'] in args.table
@@ -544,32 +535,20 @@ def main():
         
         from pipeline.utils.repo_manager import DatasetRepoManager, _force_remove_readonly
         
-        if repo_mode == "ephemeral":
-            repo_manager = DatasetRepoManager(
-                repo_dir=settings.dataset_repo_dir,
-                remote_url=settings.dataset_repo_url,
-            )
-        else:
-            # Persistent: the export dir IS the repo
-            repo_manager = DatasetRepoManager(
-                repo_dir=export_base_dir,
-                remote_url=settings.dataset_repo_url,
-            )
+        repo_manager = DatasetRepoManager(
+            repo_dir=export_base_dir,
+            remote_url=settings.dataset_repo_url,
+        )
         
+        # Wipe only the table folders about to be re-exported
         data_dir = Path(export_base_dir) / "data"
-        if repo_mode == "ephemeral":
-            # Full wipe for a clean delivery envelope
-            if data_dir.exists():
-                shutil.rmtree(str(data_dir), onerror=_force_remove_readonly)
-        else:
-            # Persistent: only wipe the table folders about to be re-exported
-            enc_dir = data_dir / "encrypted"
-            if enc_dir.exists():
-                for tc in table_configs:
-                    folder = obfuscator.generate_folder_id(tc['name']) if obfuscator else tc['name']
-                    table_dir = enc_dir / folder
-                    if table_dir.exists():
-                        shutil.rmtree(str(table_dir), onerror=_force_remove_readonly)
+        enc_dir = data_dir / "encrypted"
+        if enc_dir.exists():
+            for tc in table_configs:
+                folder = obfuscator.generate_folder_id(tc['name']) if obfuscator else tc['name']
+                table_dir = enc_dir / folder
+                if table_dir.exists():
+                    shutil.rmtree(str(table_dir), onerror=_force_remove_readonly)
         data_dir.mkdir(parents=True, exist_ok=True)
         (data_dir / "encrypted").mkdir(exist_ok=True)
         (data_dir / "raw").mkdir(exist_ok=True)
@@ -580,7 +559,6 @@ def main():
             flags.append("obfuscated")
         if args.full_reload:
             flags.append("full-reload")
-        flags.append(repo_mode)
         print(f"\n{'=' * 70}")
         print(f"EXPORT  {len(table_configs)} table(s) | {' | '.join(flags)}")
         print(f"  Data: {data_dir}")
@@ -665,15 +643,7 @@ def main():
                 print(f"    {result['table_name']}: {archive_info['size_mb']:.2f} MB")
         
         if export_results:
-            if repo_mode == "ephemeral":
-                repo_manager.reset()
-                for result in export_results:
-                    folder = result.get("folder_id") or result["table_name"]
-                    source = Path(export_base_dir) / "data" / "encrypted" / folder
-                    if source.is_dir():
-                        repo_manager.stage_table(source, folder)
-            else:
-                repo_manager.ensure_init()
+            repo_manager.ensure_init()
             
             from pipeline.utils.repo_manager import build_delivery_manifest
             delivery = build_delivery_manifest(
@@ -688,7 +658,7 @@ def main():
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
             commit_msg = f"{delivery['run_purpose']} [{timestamp}]"
             sha = repo_manager.commit(commit_msg)
-            print(f"\n  Repo ({repo_mode}): committed {sha[:8] if sha else '(no changes)'}")
+            print(f"\n  Committed: {sha[:8] if sha else '(no changes)'}")
         
         if args.push:
             if settings.dataset_repo_url:
