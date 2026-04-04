@@ -475,9 +475,9 @@ def main():
     )
     parser.add_argument(
         "--repo-mode",
-        choices=["single", "repo"],
+        choices=["persistent", "ephemeral"],
         default=None,
-        help="Git delivery: 'single' (no git) or 'repo' (disposable dataset repo, reset each run)"
+        help="Git delivery: 'persistent' (default, long-living repo with history) or 'ephemeral' (disposable repo, reset each run)"
     )
     parser.add_argument(
         "--bundle",
@@ -530,25 +530,7 @@ def main():
         
         obfuscator = DataObfuscator() if use_obfuscation else None
         
-        # Initialize repo manager if needed
-        repo_manager = None
-        if repo_mode == "repo":
-            from pipeline.utils.repo_manager import DatasetRepoManager
-            repo_manager = DatasetRepoManager(
-                repo_dir=settings.dataset_repo_dir,
-                remote_url=settings.dataset_repo_url,
-            )
-        
-        # Wipe the data/ folder for a fresh delivery
-        data_dir = Path(export_base_dir) / "data"
-        if data_dir.exists():
-            from pipeline.utils.repo_manager import _force_remove_readonly
-            shutil.rmtree(str(data_dir), onerror=_force_remove_readonly)
-        data_dir.mkdir(parents=True, exist_ok=True)
-        (data_dir / "encrypted").mkdir(exist_ok=True)
-        (data_dir / "raw").mkdir(exist_ok=True)
-        
-        # Determine tables to export
+        # Determine tables to export (needed before per-table wipe)
         if args.table:
             table_configs = [
                 t for t in config['tables'] if t['name'] in args.table
@@ -560,14 +542,45 @@ def main():
         else:
             table_configs = config['tables']
         
+        from pipeline.utils.repo_manager import DatasetRepoManager, _force_remove_readonly
+        
+        if repo_mode == "ephemeral":
+            repo_manager = DatasetRepoManager(
+                repo_dir=settings.dataset_repo_dir,
+                remote_url=settings.dataset_repo_url,
+            )
+        else:
+            # Persistent: the export dir IS the repo
+            repo_manager = DatasetRepoManager(
+                repo_dir=export_base_dir,
+                remote_url=settings.dataset_repo_url,
+            )
+        
+        data_dir = Path(export_base_dir) / "data"
+        if repo_mode == "ephemeral":
+            # Full wipe for a clean delivery envelope
+            if data_dir.exists():
+                shutil.rmtree(str(data_dir), onerror=_force_remove_readonly)
+        else:
+            # Persistent: only wipe the table folders about to be re-exported
+            enc_dir = data_dir / "encrypted"
+            if enc_dir.exists():
+                for tc in table_configs:
+                    folder = obfuscator.generate_folder_id(tc['name']) if obfuscator else tc['name']
+                    table_dir = enc_dir / folder
+                    if table_dir.exists():
+                        shutil.rmtree(str(table_dir), onerror=_force_remove_readonly)
+        data_dir.mkdir(parents=True, exist_ok=True)
+        (data_dir / "encrypted").mkdir(exist_ok=True)
+        (data_dir / "raw").mkdir(exist_ok=True)
+        
         # Print compact header
         flags = [f"{compression_type}-{compression_level}"]
         if use_obfuscation:
             flags.append("obfuscated")
         if args.full_reload:
             flags.append("full-reload")
-        if repo_mode == "repo":
-            flags.append("repo")
+        flags.append(repo_mode)
         print(f"\n{'=' * 70}")
         print(f"EXPORT  {len(table_configs)} table(s) | {' | '.join(flags)}")
         print(f"  Data: {data_dir}")
@@ -651,13 +664,16 @@ def main():
                 )
                 print(f"    {result['table_name']}: {archive_info['size_mb']:.2f} MB")
         
-        if repo_manager and export_results:
-            repo_manager.reset()
-            for result in export_results:
-                folder = result.get("folder_id") or result["table_name"]
-                source = Path(export_base_dir) / "data" / "encrypted" / folder
-                if source.is_dir():
-                    repo_manager.stage_table(source, folder)
+        if export_results:
+            if repo_mode == "ephemeral":
+                repo_manager.reset()
+                for result in export_results:
+                    folder = result.get("folder_id") or result["table_name"]
+                    source = Path(export_base_dir) / "data" / "encrypted" / folder
+                    if source.is_dir():
+                        repo_manager.stage_table(source, folder)
+            else:
+                repo_manager.ensure_init()
             
             from pipeline.utils.repo_manager import build_delivery_manifest
             delivery = build_delivery_manifest(
@@ -672,26 +688,22 @@ def main():
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
             commit_msg = f"{delivery['run_purpose']} [{timestamp}]"
             sha = repo_manager.commit(commit_msg)
-            print(f"\n  Repo: committed {sha[:8] if sha else '(no changes)'}")
+            print(f"\n  Repo ({repo_mode}): committed {sha[:8] if sha else '(no changes)'}")
         
-        if args.push and repo_manager:
+        if args.push:
             if settings.dataset_repo_url:
                 push_info = repo_manager.push()
                 print(f"  Pushed: {push_info['branch']} @ {push_info['head']}")
             else:
                 print("  [!] No DATASET_REPO_URL configured, skipping push")
-        elif args.push and not repo_manager:
-            print("  [!] --push requires --repo-mode repo")
         
-        if args.bundle and repo_manager:
+        if args.bundle:
             bundle_dir = Path(settings.bundle_output_dir)
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             bundle_info = repo_manager.create_bundle(
                 bundle_dir / f"dataset_{ts}.bundle",
             )
             print(f"  Bundle: {bundle_info['size_mb']:.2f} MB -> {bundle_info['bundle_path']}")
-        elif args.bundle and not repo_manager:
-            print("  [!] --bundle requires --repo-mode repo")
         
     except KeyboardInterrupt:
         print("\n\nExport cancelled by user")

@@ -1,25 +1,39 @@
 """
 Dataset Repo Manager
-Manages a single disposable Git repository for data delivery.
+Manages a Git repository for encrypted data delivery.
 
-Architecture:
-  Every run completely resets the repository — no history is preserved.
-  The repo acts as a fresh data delivery envelope containing:
-  - Encrypted data files (Parquet chunks per table)
-  - A delivery manifest with everything the consumer needs to import
+Two repo modes (set via REPO_MODE env / --repo-mode CLI):
+
+  **persistent** (default)
+    Long-living repo.  Each export commits on top of existing history.
+    Tables accumulate — running a single-table export only updates
+    that table; other tables from previous runs remain.
+
+  **ephemeral**
+    Disposable repo.  ``reset()`` nukes and re-inits before each run
+    so the commit has no parent — a clean delivery envelope.
 
 Two transport modes:
   1. **Remote push/pull** — force-push to a shared Git remote from the
      VPN side, shallow-clone on the PSQL side.
   2. **Git bundles** — ``git bundle create`` for truly air-gapped transfer.
 
-Producer (VPN/Snowflake side)::
+Producer (VPN/Snowflake side) — persistent::
 
     mgr = DatasetRepoManager("repos/dataset", "git@github.com:org/ms-data.git")
-    mgr.reset()
+    mgr.ensure_init()
     mgr.stage_table(Path("exports/abc123"), "abc123")
     mgr.write_delivery_manifest(manifest, password="...")
-    mgr.commit("upsert: 14 tables [2026-04-03 14:30]")
+    mgr.commit("upsert: FUND_MANAGER [2026-04-03 14:30]")
+    mgr.push()
+
+Producer — ephemeral::
+
+    mgr = DatasetRepoManager("repos/dataset", "git@github.com:org/ms-data.git")
+    mgr.reset()          # nuke + git init
+    mgr.stage_table(...)
+    mgr.write_delivery_manifest(...)
+    mgr.commit("full: 14 tables [2026-04-03 14:30]")
     mgr.push()
 
 Consumer (PostgreSQL side)::
@@ -27,7 +41,6 @@ Consumer (PostgreSQL side)::
     mgr = DatasetRepoManager("repos/dataset", "git@github.com:org/ms-data.git")
     mgr.pull()
     manifest = mgr.read_delivery_manifest(password="...")
-    # manifest["tables"] has per-table sync_mode, merge_keys, postgres targets
 """
 import json
 import os
@@ -68,11 +81,14 @@ def _run_git(args: List[str], cwd: Path, check: bool = True) -> subprocess.Compl
 
 class DatasetRepoManager:
     """
-    Manage a single disposable Git repository for data delivery.
+    Manage a Git repository for encrypted data delivery.
 
-    Every run resets the repo completely — no history is preserved.
-    The repo is a fresh envelope containing encrypted data files and
-    a delivery manifest with import instructions.
+    Supports two lifecycle modes:
+
+    * **persistent** — ``ensure_init()`` creates the repo only on first
+      run; subsequent runs commit on top of existing history.
+    * **ephemeral** — ``reset()`` nukes and re-inits so every commit
+      is an orphan root (clean delivery envelope).
 
     The delivery manifest (``delivery_manifest.json`` or ``.enc``)
     contains everything the consumer needs: per-table sync modes,
@@ -86,13 +102,27 @@ class DatasetRepoManager:
         self.repo_dir = Path(repo_dir)
         self.remote_url = remote_url
 
-    # ------------------------------------------------------------------ reset
+    # -------------------------------------------------------------- init modes
+    def ensure_init(self):
+        """
+        Initialise the repo only if ``.git`` does not already exist.
+
+        Used in **persistent** mode so history is preserved across runs.
+        """
+        self.repo_dir.mkdir(parents=True, exist_ok=True)
+        git_dir = self.repo_dir / ".git"
+        if not git_dir.exists():
+            _run_git(["init"], cwd=self.repo_dir)
+            logger.info(f"Initialised new repo: {self.repo_dir}")
+        else:
+            logger.info(f"Using existing repo: {self.repo_dir}")
+
     def reset(self):
         """
         Nuke the repo entirely and ``git init`` fresh.
 
-        Removes all files (including ``.git``) so the next commit
-        has no parent — the repo starts completely empty.
+        Used in **ephemeral** mode — removes all files (including
+        ``.git``) so the next commit has no parent.
         """
         if self.repo_dir.exists():
             shutil.rmtree(str(self.repo_dir), onerror=_force_remove_readonly)
@@ -227,6 +257,10 @@ class DatasetRepoManager:
 
         Since the repo is reset each run, force-push is required
         (the local history is always unrelated to the remote).
+
+        Automatically detects the remote's default branch and renames
+        the local branch to match (e.g. ``git init`` creates ``master``
+        but GitHub defaults to ``main``).
         """
         if not self.remote_url:
             raise ValueError("No remote URL configured (set DATASET_REPO_URL in .env)")
@@ -240,6 +274,12 @@ class DatasetRepoManager:
 
         branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=self.repo_dir).stdout.strip()
 
+        remote_default = self._detect_remote_default_branch(remote_name)
+        if remote_default and remote_default != branch:
+            _run_git(["branch", "-m", branch, remote_default], cwd=self.repo_dir)
+            logger.info(f"Renamed local branch {branch} -> {remote_default} to match remote")
+            branch = remote_default
+
         args = ["push", "-u", remote_name, branch]
         if force:
             args.insert(1, "--force")
@@ -250,6 +290,22 @@ class DatasetRepoManager:
         logger.info(f"Pushed dataset repo ({branch} @ {sha}) to {remote_name}")
 
         return {"branch": branch, "head": sha, "remote": remote_name}
+
+    def _detect_remote_default_branch(self, remote_name: str) -> Optional[str]:
+        """Query the remote for its default branch (the target of HEAD)."""
+        result = _run_git(
+            ["ls-remote", "--symref", remote_name, "HEAD"],
+            cwd=self.repo_dir,
+            check=False,
+        )
+        if result.returncode != 0:
+            return None
+        for line in result.stdout.splitlines():
+            if line.startswith("ref:"):
+                # "ref: refs/heads/main\tHEAD"
+                ref = line.split()[1]
+                return ref.replace("refs/heads/", "")
+        return None
 
     def pull(self, remote_name: str = "origin") -> Dict[str, Any]:
         """

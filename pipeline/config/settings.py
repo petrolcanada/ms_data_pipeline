@@ -75,7 +75,7 @@ class Settings(BaseSettings):
         return str(Path(self.export_base_dir) / "metadata" / "raw")
 
     # Git Delivery Settings
-    repo_mode: str = Field("single", env="REPO_MODE")  # single | repo
+    repo_mode: str = Field("persistent", env="REPO_MODE")  # persistent | ephemeral
     dataset_repo_dir: str = Field("repos/dataset", env="DATASET_REPO_DIR")
     dataset_repo_url: Optional[str] = Field(None, env="DATASET_REPO_URL")
     bundle_output_dir: str = Field("bundles", env="BUNDLE_OUTPUT_DIR")

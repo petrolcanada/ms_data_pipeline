@@ -76,14 +76,14 @@ Decrypts Parquet files and loads them into PostgreSQL via COPY or upsert (depend
 Once tables exist in PostgreSQL, subsequent syncs only need export, delivery, and import. The pipeline automatically uses watermarks to extract only new/changed rows.
 
 ```bash
-# VPN side — export + push to remote in one step (requires REPO_MODE=repo)
+# VPN side — export + push to remote in one step
 python scripts/export_data.py --all --push
 
 # External side — pull from remote + auto-import (reads delivery manifest)
 python scripts/import_data.py --pull
 ```
 
-Or, if transferring files manually (`REPO_MODE=single`):
+Or, if transferring files manually:
 
 ```bash
 # VPN side — export only
@@ -293,26 +293,24 @@ python scripts/export_data.py --all --no-obfuscate
 # Compression tuning
 python scripts/export_data.py --all --no-sort --no-dictionary
 
-# Skip repo staging (overrides REPO_MODE=repo in .env)
-python scripts/export_data.py --all --repo-mode single
+# Use ephemeral repo (nuke + re-init, no history preserved)
+python scripts/export_data.py --all --repo-mode ephemeral
 ```
 
 #### Git Delivery
 
-The pipeline supports two repo modes for controlling how exported data is delivered:
+The pipeline supports two repo modes for controlling how the dataset repo is managed:
 
 | Mode | Behavior |
 |------|----------|
-| `single` | Writes encrypted files to `EXPORT_BASE_DIR` only. No Git operations. You manage commits and transfers manually. |
-| `repo` | Copies exports into a **disposable staging repo** (`DATASET_REPO_DIR`), which is deleted and re-created from scratch each run. The repo always contains a single orphan commit (no history). Enables `--push` and `--bundle`. |
+| `persistent` | **(default)** Long-living repo. Each export commits on top of existing history. Running a single-table export only updates that table; other tables from previous runs remain. |
+| `ephemeral` | Disposable repo. Nuked and re-created from scratch each run. The repo always contains a single orphan commit (no history). |
 
-Set the default via `REPO_MODE` in `.env`, or override per-run with `--repo-mode`.
-
-> **Note:** `--push` and `--bundle` require `--repo-mode repo`. If your `EXPORT_BASE_DIR` is itself a Git repo, the pipeline does not interact with it — use `repo` mode for automated delivery, or `single` mode and manage that repo yourself.
+`--push` and `--bundle` work with both modes. Set the default via `REPO_MODE` in `.env`, or override per-run with `--repo-mode`.
 
 ```bash
 # Commit to dataset repo + push to remote
-python scripts/export_data.py --all --repo-mode repo --push
+python scripts/export_data.py --all --push
 
 # With custom purpose in commit message / manifest
 python scripts/export_data.py --all --repo-mode repo --push --purpose "Q1 refresh"
@@ -433,7 +431,7 @@ API_SECRET_KEY=your_api_secret_key
 # USE_DICTIONARY_ENCODING=true        # Auto-detect low-cardinality dictionary columns
 
 # Git delivery
-# REPO_MODE=single                    # single | repo
+# REPO_MODE=persistent                # persistent | ephemeral
 # DATASET_REPO_DIR=repos/dataset
 # DATASET_REPO_URL=git@github.com:org/ms-dataset.git
 # BUNDLE_OUTPUT_DIR=bundles
@@ -463,7 +461,7 @@ All scripts use the `ENCRYPTION_PASSWORD` value from `.env`. Set it once and all
 | "Encrypted file not found" | Verify files were transferred from Snowflake server; folder names are obfuscated |
 | Zero rows exported | Test your filter in Snowflake directly; check WHERE/QUALIFY logic |
 | Schema change not detected | Run with `--force` to re-extract regardless of cache |
-| Git repo growing too large | Repo is reset each run so this shouldn't happen; check `REPO_MODE=repo` |
+| Git repo growing too large | Use `--repo-mode ephemeral` for a clean single-commit repo each run, or run `git gc` on the persistent repo |
 | Decrypted files accidentally committed | Run `python scripts/decrypt_metadata.py --clean`; they are in `.gitignore` |
 
 ## Git Tracking Strategy
