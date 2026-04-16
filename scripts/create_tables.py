@@ -52,7 +52,7 @@ def create_table(table_name: str, drop_if_exists: bool = False, password: str = 
     obfuscator = MetadataObfuscator()
     
     try:
-        encrypted_base = Path(settings.metadata_encrypted_dir)
+        encrypted_base = Path(settings.import_metadata_encrypted_dir)
         metadata_dir = encrypted_base / "schemas"
         ddl_dir = encrypted_base / "ddl"
         
@@ -345,7 +345,7 @@ def main():
         settings = get_settings()
         password = settings.encryption_password
         
-        ddl_dir = Path(settings.metadata_encrypted_dir) / "ddl"
+        ddl_dir = Path(settings.import_metadata_encrypted_dir) / "ddl"
         encrypted_files = list(ddl_dir.glob("*.enc"))
         
         if encrypted_files:

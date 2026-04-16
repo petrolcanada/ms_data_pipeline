@@ -74,6 +74,14 @@ class Settings(BaseSettings):
     def metadata_raw_dir(self) -> str:
         return str(Path(self.export_base_dir) / "metadata" / "raw")
 
+    @property
+    def import_metadata_encrypted_dir(self) -> str:
+        return str(Path(self.import_base_dir) / "metadata" / "encrypted")
+
+    @property
+    def import_metadata_raw_dir(self) -> str:
+        return str(Path(self.import_base_dir) / "metadata" / "raw")
+
     # Git Delivery Settings
     dataset_repo_url: Optional[str] = Field(None, env="DATASET_REPO_URL")
     bundle_output_dir: str = Field("bundles", env="BUNDLE_OUTPUT_DIR")

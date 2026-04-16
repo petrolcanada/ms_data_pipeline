@@ -256,6 +256,16 @@ class SnowflakeMetadataExtractor:
         
         return type_mapping.get(snowflake_type.upper(), 'TEXT')
     
+    @staticmethod
+    def _infer_type_from_source_query(source_query: str, column_name: str) -> str:
+        """Infer Snowflake type for a column alias by parsing ::TYPE casts in the source query."""
+        import re
+        pattern = rf'::([\w\s]+?)\s+AS\s+{re.escape(column_name)}\b'
+        match = re.search(pattern, source_query, re.IGNORECASE)
+        if match:
+            return match.group(1).strip().upper()
+        return "TEXT"
+
     def _map_number_type(self, precision: int, scale: int) -> str:
         """Map Snowflake NUMBER type to appropriate PostgreSQL type"""
         if scale == 0:  # Integer
@@ -669,20 +679,24 @@ class SnowflakeMetadataExtractor:
                         existing_cols = {col["name"] for col in metadata["columns"]}
                         for key in table_config.get("merge_keys", []):
                             if key not in existing_cols:
+                                sf_type = self._infer_type_from_source_query(
+                                    sf_config["source_query"], key
+                                )
+                                pg_type = self._map_to_postgres_type(sf_type, None, None, None)
                                 metadata["columns"].append({
                                     "name": key,
-                                    "data_type": "DATE",
+                                    "data_type": sf_type,
                                     "is_nullable": True,
                                     "default_value": None,
                                     "max_length": None,
                                     "precision": None,
                                     "scale": None,
                                     "position": len(metadata["columns"]) + 1,
-                                    "postgres_type": "DATE",
+                                    "postgres_type": pg_type,
                                 })
                                 logger.info(
                                     f"Added synthetic column '{key}' (from source_query) "
-                                    f"to metadata for {table_name}"
+                                    f"as {sf_type} -> {pg_type} to metadata for {table_name}"
                                 )
                     
                     if index_columns:
