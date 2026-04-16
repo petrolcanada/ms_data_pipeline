@@ -365,3 +365,54 @@ tables:
         - "MONTHENDDATE"
         - "_TIMESTAMPFROM"
         - "_TIMESTAMPTO"
+
+  # --- Category-level returns (no peer filter) ---
+
+  - name: "CATEGORY_MONTHLY_NAV_TRAILING_PERFORMANCE_RETURNS"
+    sync_mode: "upsert"
+    merge_keys: ["CategoryCode", "DayEndDate"]
+    watermark_column: "_TIMESTAMPFROM"
+    snowflake:
+      <<: *sf_defaults
+      table: "CATEGORY_MONTHLY_NAV_TRAILING_PERFORMANCE_RETURNS"
+      source_query: |
+        SELECT
+            RETURNDETAIL:CategoryCode::STRING      AS CategoryCode,
+            RETURNDETAIL:CategoryName::STRING      AS CategoryName,
+            RETURNDETAIL:DayEndDate::DATE          AS DayEndDate,
+            RETURNDETAIL:Return1Mth::FLOAT         AS Return1Mth,
+            RETURNDETAIL:Return3Mth::FLOAT         AS Return3Mth,
+            RETURNDETAIL:Return6Mth::FLOAT         AS Return6Mth,
+            RETURNDETAIL:Return9Mth::FLOAT         AS Return9Mth,
+            RETURNDETAIL:ReturnYTD::FLOAT          AS ReturnYTD,
+            RETURNDETAIL:Return1Yr::FLOAT          AS Return1Yr,
+            RETURNDETAIL:Return2Yr::FLOAT          AS Return2Yr,
+            RETURNDETAIL:Return3Yr::FLOAT          AS Return3Yr,
+            RETURNDETAIL:Return4Yr::FLOAT          AS Return4Yr,
+            RETURNDETAIL:Return5Yr::FLOAT          AS Return5Yr,
+            RETURNDETAIL:Return6Yr::FLOAT          AS Return6Yr,
+            RETURNDETAIL:Return7Yr::FLOAT          AS Return7Yr,
+            RETURNDETAIL:Return8Yr::FLOAT          AS Return8Yr,
+            RETURNDETAIL:Return9Yr::FLOAT          AS Return9Yr,
+            RETURNDETAIL:Return10Yr::FLOAT         AS Return10Yr,
+            RETURNDETAIL:Return15Yr::FLOAT         AS Return15Yr,
+            RETURNDETAIL:Return20Yr::FLOAT         AS Return20Yr,
+            REGION,
+            STATUS_CODE,
+            STATUS_MESSAGE,
+            _NAME,
+            _HASHKEY,
+            _RUNID,
+            _TIMESTAMPFROM,
+            _TIMESTAMPTO,
+            FAULT_FAULTSTRING,
+            FAULT_DETAIL_ERRORCODE
+        FROM {table}
+    postgres:
+      schema: "ms"
+      table: "CATEGORY_MONTHLY_NAV_TRAILING_PERFORMANCE_RETURNS"
+      indexes:
+        - "CategoryCode"
+        - "DayEndDate"
+        - "_TIMESTAMPFROM"
+        - "_TIMESTAMPTO"
