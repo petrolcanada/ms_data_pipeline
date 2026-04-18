@@ -12,7 +12,6 @@ from datetime import datetime
 sys.path.append(str(Path(__file__).parent.parent))
 
 from pipeline.extractors.metadata_extractor import SnowflakeMetadataExtractor
-from pipeline.loaders.postgres_loader import PostgreSQLLoader
 from pipeline.transformers.obfuscator import MetadataObfuscator
 from pipeline.config.settings import get_settings
 
@@ -22,9 +21,6 @@ def main():
     parser.add_argument("--table", help="Extract metadata for specific table")
     parser.add_argument("--all", action="store_true", help="Extract metadata for all configured tables")
     parser.add_argument("--no-check-changes", action="store_true", help="Disable metadata change detection (enabled by default)")
-    parser.add_argument("--force", action="store_true", help="Force re-extraction even if no changes detected")
-    parser.add_argument("--create-postgres", action="store_true", help="Also create PostgreSQL tables")
-    parser.add_argument("--drop-existing", action="store_true", help="Drop existing PostgreSQL tables")
     parser.add_argument("--no-obfuscate", action="store_true", help="Disable name obfuscation (enabled by default)")
     
     args = parser.parse_args()
@@ -79,13 +75,39 @@ def main():
         pg_config = table_config['postgres']
         
         try:
-            # Extract metadata from Snowflake
+            # Extract metadata from Snowflake.
+            # Pass source_query so the actual output schema is used (e.g. for
+            # tables that unpack VARIANT/JSON columns into typed columns).
             metadata = extractor.extract_table_metadata(
                 sf_config['database'],
                 sf_config['schema'],
-                sf_config['table']
+                sf_config['table'],
+                source_query=sf_config.get('source_query'),
             )
-            
+
+            # Safety net: ensure merge_keys exist in metadata even if the
+            # describe step couldn't surface them. Case-insensitive match
+            # because Snowflake uppercases unquoted identifiers.
+            if sf_config.get('source_query'):
+                existing_cols_ci = {col['name'].upper() for col in metadata['columns']}
+                for key in table_config.get('merge_keys', []):
+                    if key.upper() not in existing_cols_ci:
+                        sf_type = extractor._infer_type_from_source_query(
+                            sf_config['source_query'], key
+                        )
+                        pg_type = extractor._map_to_postgres_type(sf_type, None, None, None)
+                        metadata['columns'].append({
+                            'name': key,
+                            'data_type': sf_type,
+                            'is_nullable': True,
+                            'default_value': None,
+                            'max_length': None,
+                            'precision': None,
+                            'scale': None,
+                            'position': len(metadata['columns']) + 1,
+                            'postgres_type': pg_type,
+                        })
+
             # Save metadata to file (with change checking enabled by default)
             metadata_file, comparison = extractor.save_metadata_to_file(
                 metadata,
@@ -107,19 +129,20 @@ def main():
                         print("\nDetailed Changes:")
                         for change in comparison["changes"]:
                             change_type = change["type"]
+                            details = change.get("details", {})
                             if change_type == "column_added":
-                                print(f"  + Column added: {change['column']} ({change['data_type']})")
+                                print(f"  + Column added: {change['column']} ({details.get('data_type', 'UNKNOWN')})")
                             elif change_type == "column_removed":
-                                print(f"  - Column removed: {change['column']} ({change['data_type']})")
-                            elif change_type == "type_changed":
+                                print(f"  - Column removed: {change['column']} ({details.get('data_type', 'UNKNOWN')})")
+                            elif change_type == "column_type_changed":
                                 print(f"  ~ Type changed: {change['column']}")
-                                print(f"      {change['old_type']} → {change['new_type']}")
-                            elif change_type == "nullable_changed":
-                                nullable_str = "NULL" if change['new_nullable'] else "NOT NULL"
+                                print(f"      {details.get('old_type')} → {details.get('new_type')}")
+                            elif change_type == "column_nullable_changed":
+                                nullable_str = "NULL" if details.get('new_nullable') else "NOT NULL"
                                 print(f"  ~ Nullable changed: {change['column']} → {nullable_str}")
-                            elif change_type == "position_changed":
+                            elif change_type == "column_position_changed":
                                 print(f"  ~ Position changed: {change['column']}")
-                                print(f"      Position {change['old_position']} → {change['new_position']}")
+                                print(f"      Position {details.get('old_position')} → {details.get('new_position')}")
                     
                     print(f"\nArchived old metadata:")
                     print(f"  • metadata/encrypted/schemas/{args.table}_{datetime.now().strftime('%Y%m%d')}_metadata.json")
@@ -129,11 +152,13 @@ def main():
                 else:
                     print("\n✓ No metadata changes detected\n")
             
-            # Generate PostgreSQL DDL
+            # Generate PostgreSQL DDL with indexes and unique-constraint for merge_keys.
             ddl = extractor.generate_postgres_ddl(
                 metadata,
                 pg_config['schema'],
-                pg_config['table']
+                pg_config['table'],
+                pg_config.get('indexes', []),
+                merge_keys=table_config.get('merge_keys', []),
             )
             
             # Save DDL to file
@@ -159,34 +184,6 @@ def main():
                 print(f"  • Use same password to decrypt files")
                 print()
             
-            # Create PostgreSQL table if requested
-            if args.create_postgres:
-                print("Creating PostgreSQL table...")
-                loader = PostgreSQLLoader()
-                result = loader.create_table_from_metadata(
-                    args.table,
-                    drop_if_exists=args.drop_existing
-                )
-                
-                print("\nPostgreSQL Table Creation Results:")
-                print("=" * 50)
-                if result["status"] == "success":
-                    print(f"✓ {args.table}")
-                    print(f"  Schema: {result['schema']}")
-                    print(f"  Table: {result['table']}")
-                    print(f"  Columns: {result['columns']}")
-                    if result.get("verification"):
-                        verification = result["verification"]
-                        status = "✓" if verification["matches"] else "✗"
-                        print(f"  Verification: {status}")
-                        if verification["differences"]:
-                            for diff in verification["differences"]:
-                                print(f"    - {diff}")
-                else:
-                    print(f"✗ {args.table}")
-                    print(f"  Error: {result['error']}")
-                print()
-                
         except Exception as e:
             print(f"\n✗ Failed to extract metadata for {args.table}")
             print(f"  Error: {e}")
@@ -201,7 +198,6 @@ def main():
         
         results = extractor.extract_all_configured_tables(
             check_changes=check_changes,
-            force=args.force,
             password=password
         )
         
@@ -224,19 +220,20 @@ def main():
                         print("\nDetailed Changes:")
                         for change in comparison["changes"]:
                             change_type = change["type"]
+                            details = change.get("details", {})
                             if change_type == "column_added":
-                                print(f"  + Column added: {change['column']} ({change['data_type']})")
+                                print(f"  + Column added: {change['column']} ({details.get('data_type', 'UNKNOWN')})")
                             elif change_type == "column_removed":
-                                print(f"  - Column removed: {change['column']} ({change['data_type']})")
-                            elif change_type == "type_changed":
+                                print(f"  - Column removed: {change['column']} ({details.get('data_type', 'UNKNOWN')})")
+                            elif change_type == "column_type_changed":
                                 print(f"  ~ Type changed: {change['column']}")
-                                print(f"      {change['old_type']} → {change['new_type']}")
-                            elif change_type == "nullable_changed":
-                                nullable_str = "NULL" if change['new_nullable'] else "NOT NULL"
+                                print(f"      {details.get('old_type')} → {details.get('new_type')}")
+                            elif change_type == "column_nullable_changed":
+                                nullable_str = "NULL" if details.get('new_nullable') else "NOT NULL"
                                 print(f"  ~ Nullable changed: {change['column']} → {nullable_str}")
-                            elif change_type == "position_changed":
+                            elif change_type == "column_position_changed":
                                 print(f"  ~ Position changed: {change['column']}")
-                                print(f"      Position {change['old_position']} → {change['new_position']}")
+                                print(f"      Position {details.get('old_position')} → {details.get('new_position')}")
                     
                     print(f"\nArchived old metadata:")
                     print(f"  • metadata/encrypted/schemas/{table}_{datetime.now().strftime('%Y%m%d')}_metadata.json")
@@ -259,7 +256,7 @@ def main():
                         status_icon = "✓ [NEW]"
                     elif result.get("has_changes"):
                         status_icon = "✓ [CHANGED]"
-                    elif not args.force:
+                    else:
                         status_icon = "✓ [UNCHANGED]"
                 
                 print(f"{status_icon} {table}")
@@ -282,31 +279,5 @@ def main():
             print(f"  • Use same password to decrypt files")
             print()
         
-        # Create PostgreSQL tables if requested
-        if args.create_postgres:
-            print("Creating PostgreSQL tables...")
-            loader = PostgreSQLLoader()
-            pg_results = loader.create_all_configured_tables(drop_if_exists=args.drop_existing)
-            
-            print("\nPostgreSQL Table Creation Results:")
-            print("=" * 50)
-            for table, result in pg_results.items():
-                if result["status"] == "success":
-                    print(f"✓ {table}")
-                    print(f"  Schema: {result['schema']}")
-                    print(f"  Table: {result['table']}")
-                    print(f"  Columns: {result['columns']}")
-                    if result.get("verification"):
-                        verification = result["verification"]
-                        status = "✓" if verification["matches"] else "✗"
-                        print(f"  Verification: {status}")
-                        if verification["differences"]:
-                            for diff in verification["differences"]:
-                                print(f"    - {diff}")
-                else:
-                    print(f"✗ {table}")
-                    print(f"  Error: {result['error']}")
-                print()
-
 if __name__ == "__main__":
     main()

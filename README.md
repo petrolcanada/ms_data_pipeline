@@ -56,10 +56,10 @@ Copy the `metadata/`, `config/`, and export directories from the VPN-side machin
 **5. Create PostgreSQL tables** _(external side)_
 
 ```bash
-python scripts/extract_metadata.py --all --create-postgres --drop-existing
+python scripts/create_tables.py --all
 ```
 
-Runs the generated DDL against PostgreSQL. Only needed on first run or when schema changes are detected.
+Reads transferred DDL from `IMPORT_BASE_DIR` and runs it against PostgreSQL. Only needed on first run or when schema changes are detected. Add `--drop-existing` to recreate tables.
 
 **6. Import data** _(external side)_
 
@@ -71,31 +71,161 @@ Decrypts Parquet files and loads them into PostgreSQL via COPY or upsert (depend
 
 ---
 
-### Day-to-Day (Incremental Sync)
+### Common Workflows
 
-Once tables exist in PostgreSQL, subsequent syncs only need export, delivery, and import. The pipeline automatically uses watermarks to extract only new/changed rows.
+The pipeline is air-gapped: Snowflake is only reachable from the VPN side, PostgreSQL is only reachable from the external side. Every workflow follows the same pattern: **export on VPN side → transfer → import on external side**.
+
+> **Note:** `export_data.py` automatically extracts metadata (schema + DDL) before exporting data. You never need to run `extract_metadata.py` separately unless you want metadata only without exporting data.
+>
+> When a table has a `source_query`, the pipeline derives metadata from the actual query output rather than the raw Snowflake table. This applies to **all** tables with `source_query` — not just VARIANT/JSON unpacking. For example, tables that join with `month_ends` to add a `MONTHENDDATE` column, or alias an existing column (`SELECT *, RATINGDATE AS MONTHENDDATE`), will also have their metadata reflect the query output so that the generated DDL, indexes, and UNIQUE constraints match what the export actually produces.
+
+#### 1. Adding a Brand New Table
+
+The PostgreSQL table does not exist yet — you must create it before importing data.
+
+**Define the table in `config/tables.yaml`:**
+
+```yaml
+tables:
+  - name: "MY_NEW_TABLE"
+    sync_mode: "upsert"
+    merge_keys: ["_ID", "MONTHENDDATE"]
+    watermark_column: "_TIMESTAMPFROM"
+    snowflake:
+      <<: *sf_defaults
+      table: "MY_NEW_TABLE"
+      source_query: |        # optional — only if the raw table needs transformation
+        SELECT *, SOME_DATE AS MONTHENDDATE
+        FROM {table}
+      filter:
+        - *peer_filter        # optional
+    postgres:
+      schema: "ms"
+      table: "MY_NEW_TABLE"
+      indexes:
+        - "_ID"
+        - "MONTHENDDATE"
+        - "_TIMESTAMPFROM"
+        - "_TIMESTAMPTO"
+```
+
+**VPN side:**
 
 ```bash
-# VPN side — export + push to remote in one step
-python scripts/export_data.py --all --push
+python scripts/export_data.py --table MY_NEW_TABLE --push
+```
 
-# External side — pull from remote + auto-import (reads delivery manifest)
+**External side** (git delivery):
+
+```bash
+python scripts/import_data.py --pull                    # pull metadata + data from remote
+python scripts/create_tables.py --table MY_NEW_TABLE    # create the PostgreSQL table from DDL
+python scripts/import_data.py --table MY_NEW_TABLE      # decrypt + load data
+```
+
+**External side** (manual transfer):
+
+```bash
+# (after copying metadata/ and data/ to PostgreSQL host)
+python scripts/create_tables.py --table MY_NEW_TABLE
+python scripts/import_data.py --table MY_NEW_TABLE
+```
+
+After this, the table is part of the regular sync cycle — subsequent `--all` runs include it automatically.
+
+#### 2. Day-to-Day Incremental Sync
+
+No schema changes. PostgreSQL tables already exist. The pipeline uses watermarks to extract only new/changed rows.
+
+**VPN side:**
+
+```bash
+python scripts/export_data.py --all --push
+```
+
+**External side:**
+
+```bash
 python scripts/import_data.py --pull
 ```
 
-Or, if transferring files manually:
+Or without git delivery:
 
 ```bash
-# VPN side — export only
+# VPN side
 python scripts/export_data.py --all
-
-# (manually transfer files to PostgreSQL host)
-
-# External side — import
+# (manually transfer files)
+# External side
 python scripts/import_data.py --all
 ```
 
-To force a full re-export ignoring watermarks, add `--full-reload`. To truncate PostgreSQL tables before loading, add `--truncate` to the import command.
+#### 3. Schema Changed — Columns Added or Removed
+
+The import handles both cases automatically. No manual DDL step needed.
+
+- **Columns added in Snowflake** — `import_data.py` detects columns present in the incoming data but missing from PostgreSQL and runs `ALTER TABLE ADD COLUMN` automatically.
+- **Columns removed from Snowflake** — the import only references columns in the incoming data (via explicit `COPY ... (col1, col2, ...)`). Old columns in PostgreSQL are left in place — new rows get NULLs for those columns, existing data stays untouched.
+
+**VPN side:**
+
+```bash
+python scripts/export_data.py --all --push
+```
+
+**External side:**
+
+```bash
+python scripts/import_data.py --pull
+```
+
+Same commands as day-to-day. The pipeline logs which columns were added.
+
+#### 4. Schema Changed — Incompatible Type Change
+
+This is the only scenario that requires dropping and recreating the PostgreSQL table: when a column's data type changed and PostgreSQL cannot auto-cast the values (e.g. `TEXT` → `INTEGER`). This is rare.
+
+**VPN side:**
+
+```bash
+python scripts/export_data.py --table AFFECTED_TABLE --full-reload --push
+```
+
+**External side:**
+
+```bash
+python scripts/import_data.py --pull                                            # pull updated metadata + data
+python scripts/create_tables.py --table AFFECTED_TABLE --drop-existing          # drop + recreate from new DDL
+python scripts/import_data.py --table AFFECTED_TABLE                            # reload all data
+```
+
+#### 5. Full Reload (Re-export Everything)
+
+Ignore watermarks and re-extract all rows from Snowflake. Useful to reset state or after major changes.
+
+**VPN side:**
+
+```bash
+python scripts/export_data.py --all --full-reload --push
+```
+
+**External side:**
+
+```bash
+python scripts/import_data.py --pull --truncate
+```
+
+`--full-reload` tells Snowflake to ignore the watermark and pull all rows. `--truncate` clears the PostgreSQL tables before loading so you don't get duplicates.
+
+#### Quick Reference
+
+| Scenario | VPN side | External side |
+|---|---|---|
+| **New table** | `export_data.py --table X --push` | `import_data.py --pull` then `create_tables.py --table X` then `import_data.py --table X` |
+| **Incremental sync** | `export_data.py --all --push` | `import_data.py --pull` |
+| **Columns added/removed** | `export_data.py --all --push` | `import_data.py --pull` (auto ALTER TABLE) |
+| **Incompatible type change** | `export_data.py --table X --full-reload --push` | `import_data.py --pull` then `create_tables.py --table X --drop-existing` then `import_data.py --table X` |
+| **Full reload** | `export_data.py --all --full-reload --push` | `import_data.py --pull --truncate` |
+| **Metadata only (no data)** | `extract_metadata.py --table X` | `create_tables.py --table X` |
 
 ## Sync Modes
 
@@ -173,7 +303,7 @@ ms_data_pipeline/
 │       ├── archive.py                       # Tar.gz archiving for single-file transport
 │       └── repo_manager.py                  # Disposable dataset repo management + bundle support
 ├── scripts/
-│   ├── extract_metadata.py                  # CLI: metadata extraction + optional PG table creation
+│   ├── extract_metadata.py                  # CLI: metadata extraction from Snowflake (VPN side)
 │   ├── export_data.py                       # CLI: data export with watermark + sync mode support
 │   ├── import_data.py                       # CLI: decrypt + COPY/upsert into PostgreSQL with resume
 │   ├── create_tables.py                     # CLI: apply DDL from metadata
@@ -199,11 +329,12 @@ ms_data_pipeline/
 
 ### Schema Evolution
 
-The pipeline detects schema changes between extractions and can apply them non-destructively:
+The pipeline detects schema changes between extractions and handles them on import:
 
-- **Safe changes** (column additions, compatible type widening) are applied via `ALTER TABLE` automatically
-- **Breaking changes** (column removal, type narrowing) require explicit `--force` to apply
-- **Migration tracking:** All DDL changes are recorded in `{schema}._pipeline_migrations` for audit
+- **Columns added** — `import_data.py` runs `ALTER TABLE ADD COLUMN` automatically
+- **Columns removed** — import continues normally; old columns are left in PostgreSQL with NULLs for new rows
+- **Incompatible type changes** — requires `create_tables.py --drop-existing` to recreate the table (rare)
+- **Migration tracking:** DDL changes are recorded in `{schema}._pipeline_migrations` for audit
 
 ### Compression Optimization
 
@@ -341,25 +472,24 @@ python scripts/import_data.py --table TABLE --from-archive exports/TABLE.tar.gz
 python scripts/import_data.py --all --keep-decrypted
 ```
 
-### Metadata & Schema (`scripts/extract_metadata.py`)
+### Metadata & Schema
 
 ```bash
-# Extract metadata from Snowflake
+# Extract metadata from Snowflake (VPN side)
 python scripts/extract_metadata.py --all
 
-# Check for schema changes since last extraction
-python scripts/extract_metadata.py --all --check-changes
+# Extract a single table
+python scripts/extract_metadata.py --table FUND_ATTRIBUTES_CA_OPENEND
 
-# Create PostgreSQL tables from metadata
-python scripts/extract_metadata.py --all --create-postgres --drop-existing
+# Create PostgreSQL tables from transferred DDL (external side)
+python scripts/create_tables.py --all
+python scripts/create_tables.py --table FUND_ATTRIBUTES_CA_OPENEND
+python scripts/create_tables.py --all --drop-existing
 ```
 
 ### Other Scripts
 
 ```bash
-# Apply DDL to PostgreSQL
-python scripts/create_tables.py --all
-
 # Decrypt metadata for local viewing
 python scripts/decrypt_metadata.py
 
@@ -449,7 +579,7 @@ All scripts use the `ENCRYPTION_PASSWORD` value from `.env`. Set it once and all
 | "Table not found in config" | Add the table to `config/tables.yaml` first |
 | "Encrypted file not found" | Verify files were transferred from Snowflake server; folder names are obfuscated |
 | Zero rows exported | Test your filter in Snowflake directly; check WHERE/QUALIFY logic |
-| Schema change not detected | Run with `--force` to re-extract regardless of cache |
+| Schema change not detected | Re-run `extract_metadata.py` — it always re-extracts from Snowflake |
 | Git repo growing too large | Run `git gc` in the dataset repo, or add large generated files to `.gitignore` |
 | Decrypted files accidentally committed | Run `python scripts/decrypt_metadata.py --clean`; they are in `.gitignore` |
 

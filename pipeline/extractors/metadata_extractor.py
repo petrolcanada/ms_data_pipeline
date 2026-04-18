@@ -82,16 +82,31 @@ class SnowflakeMetadataExtractor:
                 logger.info("SSO authentication requires a browser. Ensure you're running in an environment with browser access.")
             raise
     
-    def extract_table_metadata(self, database: str, schema: str, table: str, conn=None) -> Dict[str, Any]:
+    def extract_table_metadata(
+        self,
+        database: str,
+        schema: str,
+        table: str,
+        conn=None,
+        source_query: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
-        Extract complete metadata for a specific table
-        
+        Extract complete metadata for a specific table.
+
+        When ``source_query`` is provided, the column schema is taken from the
+        result of that query (via cursor.describe) rather than from
+        INFORMATION_SCHEMA.COLUMNS on the raw table. This is essential for
+        tables whose source_query rewrites the schema -- e.g. unpacking a
+        VARIANT/JSON column into many typed columns. Statistics and primary
+        keys still come from the raw table since that's where the data lives.
+
         Args:
             database: Snowflake database name
             schema: Snowflake schema name
             table: Snowflake table name
             conn: Optional existing Snowflake connection (if None, creates new connection)
-            
+            source_query: Optional source query used to derive the actual output schema.
+
         Returns:
             Dictionary with table metadata
         """
@@ -105,31 +120,52 @@ class SnowflakeMetadataExtractor:
         
         try:
             logger.info(f"Extracting metadata for {database}.{schema}.{table}")
-            
-            # Get table schema information
-            schema_query = f"""
-            SELECT 
-                COLUMN_NAME,
-                DATA_TYPE,
-                IS_NULLABLE,
-                COLUMN_DEFAULT,
-                CHARACTER_MAXIMUM_LENGTH,
-                NUMERIC_PRECISION,
-                NUMERIC_SCALE,
-                ORDINAL_POSITION
-            FROM {database}.INFORMATION_SCHEMA.COLUMNS 
-            WHERE TABLE_SCHEMA = '{schema}' 
-            AND TABLE_NAME = '{table}'
-            ORDER BY ORDINAL_POSITION
-            """
-            
-            cursor.execute(schema_query)
-            columns = cursor.fetchall()
-            
-            if not columns:
-                raise ValueError(f"Table {database}.{schema}.{table} not found or has no columns")
-            
-            # Get table statistics
+
+            if source_query:
+                # Use the actual output schema produced by source_query.
+                column_dicts = self._extract_columns_from_source_query(
+                    cursor, source_query, database, schema, table
+                )
+            else:
+                # Fall back to the raw table schema from INFORMATION_SCHEMA.
+                schema_query = f"""
+                SELECT
+                    COLUMN_NAME,
+                    DATA_TYPE,
+                    IS_NULLABLE,
+                    COLUMN_DEFAULT,
+                    CHARACTER_MAXIMUM_LENGTH,
+                    NUMERIC_PRECISION,
+                    NUMERIC_SCALE,
+                    ORDINAL_POSITION
+                FROM {database}.INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = '{schema}'
+                AND TABLE_NAME = '{table}'
+                ORDER BY ORDINAL_POSITION
+                """
+
+                cursor.execute(schema_query)
+                rows = cursor.fetchall()
+
+                if not rows:
+                    raise ValueError(f"Table {database}.{schema}.{table} not found or has no columns")
+
+                column_dicts = []
+                for col in rows:
+                    column_dicts.append({
+                        "name": col[0],
+                        "data_type": col[1],
+                        "is_nullable": col[2] == 'YES',
+                        "default_value": col[3],
+                        "max_length": col[4],
+                        "precision": col[5],
+                        "scale": col[6],
+                        "position": col[7],
+                        "postgres_type": self._map_to_postgres_type(col[1], col[4], col[5], col[6]),
+                    })
+
+            # Get table statistics from the raw table (data lives there even
+            # when source_query transforms the projection).
             stats_query = f"""
             SELECT 
                 ROW_COUNT,
@@ -168,15 +204,15 @@ class SnowflakeMetadataExtractor:
             except Exception as pk_err:
                 logger.debug(f"Could not query primary keys for {table}: {pk_err}")
             
-            # Build metadata structure
             metadata = {
                 "table_info": {
                     "database": database,
                     "schema": schema,
                     "table": table,
-                    "full_name": f"{database}.{schema}.{table}"
+                    "full_name": f"{database}.{schema}.{table}",
+                    "schema_source": "source_query" if source_query else "information_schema",
                 },
-                "columns": [],
+                "columns": column_dicts,
                 "statistics": {
                     "row_count": stats[0] if stats else 0,
                     "size_bytes": stats[1] if stats else 0,
@@ -185,22 +221,7 @@ class SnowflakeMetadataExtractor:
                 "primary_keys": primary_keys,
                 "extracted_at": str(pd.Timestamp.now())
             }
-            
-            # Process columns
-            for col in columns:
-                column_info = {
-                    "name": col[0],
-                    "data_type": col[1],
-                    "is_nullable": col[2] == 'YES',
-                    "default_value": col[3],
-                    "max_length": col[4],
-                    "precision": col[5],
-                    "scale": col[6],
-                    "position": col[7],
-                    "postgres_type": self._map_to_postgres_type(col[1], col[4], col[5], col[6])
-                }
-                metadata["columns"].append(column_info)
-            
+
             logger.info(f"✅ Extracted metadata for {database}.{schema}.{table}")
             logger.info(f"   Columns: {len(metadata['columns'])}")
             logger.info(f"   Rows: {metadata['statistics']['row_count']:,}")
@@ -265,6 +286,94 @@ class SnowflakeMetadataExtractor:
         if match:
             return match.group(1).strip().upper()
         return "TEXT"
+
+    # Snowflake cursor.describe() returns numeric type_code values; map them
+    # back to SQL type names that _map_to_postgres_type understands.
+    _FIELD_ID_TO_SQL_TYPE = {
+        0: "NUMBER",          # FIXED -> NUMBER (uses precision/scale)
+        1: "FLOAT",           # REAL
+        2: "VARCHAR",         # TEXT  (uses internal_size for length)
+        3: "DATE",
+        4: "TIMESTAMP",
+        5: "VARIANT",
+        6: "TIMESTAMP_LTZ",
+        7: "TIMESTAMP_TZ",
+        8: "TIMESTAMP_NTZ",
+        9: "OBJECT",
+        10: "ARRAY",
+        11: "BINARY",
+        12: "TIME",
+        13: "BOOLEAN",
+        14: "GEOGRAPHY",
+        15: "GEOMETRY",
+        16: "VECTOR",
+    }
+
+    @classmethod
+    def _snowflake_field_id_to_sql_type(cls, type_code: int) -> str:
+        """Translate Snowflake's numeric type_code to a SQL type name."""
+        return cls._FIELD_ID_TO_SQL_TYPE.get(type_code, "TEXT")
+
+    def _extract_columns_from_source_query(
+        self,
+        cursor,
+        source_query: str,
+        database: str,
+        schema: str,
+        table: str,
+    ) -> List[Dict[str, Any]]:
+        """
+        Use Snowflake's PREPARE/describe to get the actual output schema of source_query.
+
+        This is needed for tables whose source_query rewrites the schema (e.g.,
+        unpacking VARIANT/JSON dictionaries into typed columns). Querying
+        INFORMATION_SCHEMA.COLUMNS on the raw table would miss those unpacked
+        columns entirely.
+
+        Args:
+            cursor: Active Snowflake cursor.
+            source_query: Raw source query from tables.yaml (may contain {table}).
+            database/schema/table: Used to resolve the {table} placeholder.
+
+        Returns:
+            List of column dicts in the same shape produced by extract_table_metadata.
+        """
+        fqn = f"{database}.{schema}.{table}"
+        resolved = source_query.strip().replace("{table}", fqn)
+        wrapped = f"SELECT * FROM ({resolved}) AS _src"
+
+        logger.info(f"Describing source_query for {fqn} (no rows fetched)")
+        try:
+            result_metadata = cursor.describe(wrapped)
+        except Exception as e:
+            logger.error(f"Failed to describe source_query for {fqn}: {e}")
+            raise
+
+        columns: List[Dict[str, Any]] = []
+        for idx, col in enumerate(result_metadata, start=1):
+            sf_type = self._snowflake_field_id_to_sql_type(col.type_code)
+
+            max_length = col.internal_size if sf_type in ("VARCHAR", "BINARY") else None
+            precision = col.precision
+            scale = col.scale
+
+            columns.append({
+                "name": col.name,
+                "data_type": sf_type,
+                "is_nullable": bool(col.is_nullable),
+                "default_value": None,
+                "max_length": max_length,
+                "precision": precision,
+                "scale": scale,
+                "position": idx,
+                "postgres_type": self._map_to_postgres_type(sf_type, max_length, precision, scale),
+            })
+
+        logger.info(
+            f"Resolved {len(columns)} columns from source_query for {fqn} "
+            f"(vs raw table schema)"
+        )
+        return columns
 
     def _map_number_type(self, precision: int, scale: int) -> str:
         """Map Snowflake NUMBER type to appropriate PostgreSQL type"""
@@ -628,13 +737,12 @@ class SnowflakeMetadataExtractor:
         
         return ddl_file
     
-    def extract_all_configured_tables(self, check_changes: bool = False, force: bool = False, password: Optional[str] = None, conn=None, table_names: Optional[List[str]] = None) -> Dict[str, Any]:
+    def extract_all_configured_tables(self, check_changes: bool = False, password: Optional[str] = None, conn=None, table_names: Optional[List[str]] = None) -> Dict[str, Any]:
         """
         Extract metadata for all tables in config/tables.yaml
         
         Args:
             check_changes: Whether to check for metadata changes
-            force: Force re-extraction even if no changes detected
             password: Encryption password (required if obfuscation enabled)
             conn: Optional external Snowflake connection to reuse
             table_names: Optional list of table names to filter to (None = all)
@@ -673,12 +781,18 @@ class SnowflakeMetadataExtractor:
                         sf_config["schema"],
                         sf_config["table"],
                         conn=conn,
+                        source_query=sf_config.get("source_query"),
                     )
-                    
+
                     if sf_config.get("source_query"):
-                        existing_cols = {col["name"] for col in metadata["columns"]}
+                        # Safety net: if a merge_key still isn't in the metadata
+                        # (e.g. source_query was None at describe time, or the
+                        # alias is missing), inject it from the query text.
+                        # Compare case-insensitively because Snowflake uppercases
+                        # unquoted identifiers.
+                        existing_cols_ci = {col["name"].upper() for col in metadata["columns"]}
                         for key in table_config.get("merge_keys", []):
-                            if key not in existing_cols:
+                            if key.upper() not in existing_cols_ci:
                                 sf_type = self._infer_type_from_source_query(
                                     sf_config["source_query"], key
                                 )
@@ -716,11 +830,6 @@ class SnowflakeMetadataExtractor:
                         check_changes=check_changes,
                         password=password
                     )
-                    
-                    skip_ddl = False
-                    if check_changes and comparison and not comparison["has_changes"] and not force:
-                        logger.info(f"Skipping DDL generation for {table_name} (no changes detected)")
-                        skip_ddl = True
                     
                     merge_keys = table_config.get("merge_keys", [])
                     ddl = self.generate_postgres_ddl(

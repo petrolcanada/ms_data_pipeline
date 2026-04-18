@@ -72,47 +72,54 @@ class MetadataComparator:
         }
     
     def _compare_columns(self, old_columns: List[Dict], new_columns: List[Dict]):
-        """Compare column definitions"""
-        # Create lookup dictionaries
-        old_cols_dict = {col['name']: col for col in old_columns}
-        new_cols_dict = {col['name']: col for col in new_columns}
+        """Compare column definitions.
+
+        Column name matching is case-insensitive because Snowflake uppercases
+        unquoted identifiers — e.g. ``AS CategoryCode`` becomes ``CATEGORYCODE``
+        in cursor.describe(). Without this, a case-only difference would appear
+        as a column removed + column added.
+        """
+        # Key by uppercased name for case-insensitive matching.
+        # Store the original name alongside the column dict for reporting.
+        old_cols_dict = {col['name'].upper(): col for col in old_columns}
+        new_cols_dict = {col['name'].upper(): col for col in new_columns}
         
         old_col_names = set(old_cols_dict.keys())
         new_col_names = set(new_cols_dict.keys())
         
         # Detect added columns
         added_cols = new_col_names - old_col_names
-        for col_name in added_cols:
-            col = new_cols_dict[col_name]
+        for col_key in added_cols:
+            col = new_cols_dict[col_key]
             self.changes.append({
                 "type": "column_added",
-                "column": col_name,
+                "column": col['name'],
                 "details": {
                     "data_type": col.get('data_type'),
                     "nullable": col.get('nullable'),
                     "position": col.get('ordinal_position')
                 }
             })
-            logger.info(f"Column added: {col_name} ({col.get('data_type')})")
+            logger.info(f"Column added: {col['name']} ({col.get('data_type')})")
         
         # Detect removed columns
         removed_cols = old_col_names - new_col_names
-        for col_name in removed_cols:
-            col = old_cols_dict[col_name]
+        for col_key in removed_cols:
+            col = old_cols_dict[col_key]
             self.changes.append({
                 "type": "column_removed",
-                "column": col_name,
+                "column": col['name'],
                 "details": {
                     "data_type": col.get('data_type')
                 }
             })
-            logger.info(f"Column removed: {col_name}")
+            logger.info(f"Column removed: {col['name']}")
         
         # Detect modified columns
         common_cols = old_col_names & new_col_names
-        for col_name in common_cols:
-            old_col = old_cols_dict[col_name]
-            new_col = new_cols_dict[col_name]
+        for col_key in common_cols:
+            old_col = old_cols_dict[col_key]
+            new_col = new_cols_dict[col_key]
             
             # Check type change
             if old_col.get('data_type') != new_col.get('data_type'):

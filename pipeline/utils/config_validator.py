@@ -62,8 +62,10 @@ def validate_index_configuration(
         logger.debug(f"No indexes configured for table {table_name}")
         return ValidationResult(success=True, errors=[], warnings=[])
     
-    # Get available columns from metadata
-    available_columns = {col["name"] for col in table_metadata["columns"]}
+    # Get available columns from metadata (case-insensitive lookup because
+    # Snowflake uppercases unquoted identifiers, e.g. cursor.describe()
+    # returns CATEGORYCODE while tables.yaml may say CategoryCode).
+    available_columns_ci = {col["name"].upper() for col in table_metadata["columns"]}
     
     # Check for duplicate columns in index list
     seen_columns = set()
@@ -74,8 +76,8 @@ def validate_index_configuration(
     
     # Validate each index column exists in table
     invalid_columns = []
-    for col in seen_columns:  # Use seen_columns to avoid duplicate checks
-        if col not in available_columns:
+    for col in seen_columns:
+        if col.upper() not in available_columns_ci:
             invalid_columns.append(col)
     
     if invalid_columns:

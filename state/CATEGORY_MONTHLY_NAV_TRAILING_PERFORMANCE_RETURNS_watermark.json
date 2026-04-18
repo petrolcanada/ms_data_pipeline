@@ -1,0 +1,18 @@
+{
+  "table_name": "CATEGORY_MONTHLY_NAV_TRAILING_PERFORMANCE_RETURNS",
+  "watermark_value": "2026-04-08 05:04:59.564000+00:00",
+  "rows_exported": 2237,
+  "updated_at": "2026-04-17T22:44:06.786132-04:00",
+  "history": [
+    {
+      "watermark_value": "2026-04-08 05:04:59.564000+00:00",
+      "rows_exported": 2237,
+      "updated_at": "2026-04-17T22:36:22.854257-04:00"
+    },
+    {
+      "watermark_value": "2026-04-08 05:04:59.564000+00:00",
+      "rows_exported": 2237,
+      "updated_at": "2026-04-17T22:40:41.097764-04:00"
+    }
+  ]
+}

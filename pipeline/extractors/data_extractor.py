@@ -248,7 +248,7 @@ class SnowflakeDataExtractor:
         watermark_value: str,
     ) -> str:
         """Append a watermark predicate to an existing filter clause.
-        
+
         If there is already a WHERE clause the watermark is ANDed in;
         otherwise a new WHERE is created. QUALIFY clauses are preserved
         after the watermark.
@@ -259,14 +259,18 @@ class SnowflakeDataExtractor:
             return f"WHERE {predicate}"
 
         upper = filter_clause.upper()
+        has_where = "WHERE" in upper
         qualify_idx = upper.find("QUALIFY")
 
         if qualify_idx == -1:
-            return f"{filter_clause} AND {predicate}"
+            joiner = "AND" if has_where else "WHERE"
+            return f"{filter_clause} {joiner} {predicate}"
 
         before_qualify = filter_clause[:qualify_idx].rstrip()
         qualify_part = filter_clause[qualify_idx:]
-        return f"{before_qualify} AND {predicate} {qualify_part}"
+        has_where_before = "WHERE" in before_qualify.upper()
+        joiner = "AND" if has_where_before else "WHERE"
+        return f"{before_qualify} {joiner} {predicate} {qualify_part}"
 
     def extract_table_chunks(
         self, 
