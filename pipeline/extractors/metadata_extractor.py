@@ -255,7 +255,7 @@ class SnowflakeMetadataExtractor:
             'DOUBLE': 'DOUBLE PRECISION',
             'DOUBLE PRECISION': 'DOUBLE PRECISION',
             'REAL': 'REAL',
-            'VARCHAR': f'VARCHAR({max_length})' if max_length else 'TEXT',
+            'VARCHAR': f'VARCHAR({max_length})' if max_length and max_length <= 10485760 else 'TEXT',
             'CHAR': f'CHAR({max_length})' if max_length else 'CHAR(1)',
             'CHARACTER': f'CHAR({max_length})' if max_length else 'CHAR(1)',
             'STRING': 'TEXT',

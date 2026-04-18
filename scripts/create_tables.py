@@ -119,8 +119,15 @@ def create_table(table_name: str, drop_if_exists: bool = False, password: str = 
                 with open(temp_ddl, 'r') as f:
                     ddl = f.read()
                 
-                # Extract schema and table from DDL
+                # Snowflake default VARCHAR(16777216) exceeds PostgreSQL max (10485760) -- use TEXT
                 import re
+                ddl = re.sub(
+                    r'VARCHAR\((\d+)\)',
+                    lambda m: 'TEXT' if int(m.group(1)) > 10485760 else m.group(0),
+                    ddl,
+                )
+                
+                # Extract schema and table from DDL
                 match = re.search(r'CREATE TABLE IF NOT EXISTS (\w+)\.(\w+)', ddl)
                 if match:
                     schema = match.group(1)
@@ -347,14 +354,23 @@ def main():
         
         ddl_dir = Path(settings.import_metadata_encrypted_dir) / "ddl"
         encrypted_files = list(ddl_dir.glob("*.enc"))
+        use_encryption = bool(encrypted_files)
         
-        if encrypted_files:
-            print(f"\n🔒 Detected {len(encrypted_files)} encrypted DDL files")
+        if args.table:
+            print(f"\n📌 Target table: {args.table}")
+            if use_encryption:
+                print(f"🔒 DDL files are encrypted (will decrypt on the fly)")
         else:
-            print(f"\n📁 Using unencrypted DDL files")
+            if use_encryption:
+                print(f"\n🔒 Detected {len(encrypted_files)} encrypted DDL files")
+            else:
+                print(f"\n📁 Using unencrypted DDL files")
         
         if args.drop_existing:
-            print(f"\n⚠️  WARNING: Existing tables will be dropped and recreated!")
+            if args.table:
+                print(f"\n⚠️  WARNING: Table '{args.table}' will be dropped and recreated!")
+            else:
+                print(f"\n⚠️  WARNING: ALL existing tables will be dropped and recreated!")
             response = input("Continue? (yes/no): ").strip().lower()
             if response != 'yes':
                 print("Cancelled by user")

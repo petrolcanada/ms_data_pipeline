@@ -194,7 +194,7 @@ python scripts/export_data.py --table AFFECTED_TABLE --full-reload --push
 
 ```bash
 python scripts/import_data.py --pull                                            # pull updated metadata + data
-python scripts/create_tables.py --table AFFECTED_TABLE --drop-existing          # drop + recreate from new DDL
+python scripts/create_tables.py --table CATEGORY_MONTHLY_NAV_TRAILING_PERFORMANCE_RETURNS --drop-existing          # drop + recreate from new DDL
 python scripts/import_data.py --table AFFECTED_TABLE                            # reload all data
 ```
 

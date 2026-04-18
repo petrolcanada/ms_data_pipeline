@@ -377,8 +377,8 @@ tables:
       table: "CATEGORY_MONTHLY_NAV_TRAILING_PERFORMANCE_RETURNS"
       source_query: |
         SELECT
-            RETURNDETAIL:CategoryCode::STRING      AS CategoryCode,
-            RETURNDETAIL:CategoryName::STRING      AS CategoryName,
+            RETURNDETAIL:CategoryCode::VARCHAR(50)  AS CategoryCode,
+            RETURNDETAIL:CategoryName::VARCHAR(200) AS CategoryName,
             RETURNDETAIL:DayEndDate::DATE          AS DayEndDate,
             RETURNDETAIL:Return1Mth::FLOAT         AS Return1Mth,
             RETURNDETAIL:Return3Mth::FLOAT         AS Return3Mth,
